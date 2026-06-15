@@ -26,3 +26,6 @@ go.work.sum
 
 main.exe
 pem
+settings.json
+partners.json
+app.log
