@@ -6,12 +6,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Pocketwind/SWIFT-Launcher/config"
 	"github.com/Pocketwind/SWIFT-Launcher/logging"
 	"github.com/fsnotify/fsnotify"
 )
 
-func WatchFileService(path string, exitCmd <-chan bool, filePath chan<- string, logCh chan<- logging.LogData) {
-	logging.Easylog(logCh, "INFO", fmt.Sprintf("Starting File Watcher Service for path: %s", path))
+func WatchFileService(partner *config.Partner, exitCmd <-chan bool, logCh chan<- logging.LogData) {
+	logging.Easylog(logCh, "INFO", fmt.Sprintf("Starting File Watcher Service for path: %s", partner.InputPath))
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -20,14 +21,14 @@ func WatchFileService(path string, exitCmd <-chan bool, filePath chan<- string, 
 	}
 	defer watcher.Close()
 
-	err = watcher.Add(path)
+	err = watcher.Add(partner.InputPath)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error adding file to watcher: %v", err))
 		return
 	}
 
 	// Process files that were already present while the program was down.
-	enqueueExistingFiles(path, exitCmd, filePath, logCh)
+	enqueueExistingFiles(partner, exitCmd, logCh)
 
 loop:
 	for {
@@ -44,7 +45,7 @@ loop:
 				//event.Name이 파일 들어온 경로
 				WaitFileReady(event.Name, 10*time.Second) //파일이 완전히 쓰여질 때까지 대기
 				select {
-				case filePath <- event.Name:
+				case partner.InputChannel <- event.Name:
 				case <-exitCmd:
 					break loop
 				}
@@ -61,14 +62,14 @@ loop:
 	logging.Easylog(logCh, "INFO", "File Watcher Service stopped")
 }
 
-func enqueueExistingFiles(path string, exitCmd <-chan bool, filePath chan<- string, logCh chan<- logging.LogData) {
-	entries, err := os.ReadDir(path)
+func enqueueExistingFiles(partner *config.Partner, exitCmd <-chan bool, logCh chan<- logging.LogData) {
+	entries, err := os.ReadDir(partner.InputPath)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error reading startup files: %v", err))
 		return
 	}
 
-	logging.Easylog(logCh, "INFO", fmt.Sprintf("Startup scan started: %s", path))
+	logging.Easylog(logCh, "INFO", fmt.Sprintf("Startup scan started: %s", partner.InputPath))
 	queued := 0
 
 	for _, entry := range entries {
@@ -76,14 +77,14 @@ func enqueueExistingFiles(path string, exitCmd <-chan bool, filePath chan<- stri
 			continue
 		}
 
-		fullPath := filepath.Join(path, entry.Name())
+		fullPath := filepath.Join(partner.InputPath, entry.Name())
 		if err := WaitFileReady(fullPath, 10*time.Second); err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Startup file is not ready: %s: %v", fullPath, err))
 			continue
 		}
 
 		select {
-		case filePath <- fullPath:
+		case partner.InputChannel <- fullPath:
 			queued++
 			logging.Easylog(logCh, "INFO", fmt.Sprintf("Queued startup file: %s", fullPath))
 		case <-exitCmd:
@@ -91,5 +92,5 @@ func enqueueExistingFiles(path string, exitCmd <-chan bool, filePath chan<- stri
 		}
 	}
 
-	logging.Easylog(logCh, "INFO", fmt.Sprintf("Startup scan completed: %s (queued=%d)", path, queued))
+	logging.Easylog(logCh, "INFO", fmt.Sprintf("Startup scan completed: %s (queued=%d)", partner.InputPath, queued))
 }

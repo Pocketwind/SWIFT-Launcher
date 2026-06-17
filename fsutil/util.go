@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/antchfx/xmlquery"
+	"github.com/beevik/etree"
 )
 
 func EnsureDir(dirs ...string) error {
@@ -61,4 +64,41 @@ func PathHelper(path string) string {
 		return ""
 	}
 	return strings.ReplaceAll(path, "\\", "/")
+}
+
+func GetFileName(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Base(path)
+}
+
+func GetFileExt(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Ext(path)
+}
+
+func SafeInnerText(node *xmlquery.Node) string {
+	if node == nil {
+		return ""
+	}
+	return node.InnerText()
+}
+
+func FormatXMLString(raw string) (string, error) {
+	doc := etree.NewDocument()
+	if err := doc.ReadFromString(raw); err != nil {
+		return "", fmt.Errorf("error parsing XML for formatting: %w", err)
+	}
+
+	doc.IndentTabs()
+
+	formatted, err := doc.WriteToString()
+	if err != nil {
+		return "", fmt.Errorf("error writing formatted XML: %w", err)
+	}
+
+	return formatted, nil
 }

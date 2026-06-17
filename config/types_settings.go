@@ -38,6 +38,7 @@ type Messaging struct {
 	MaxDistributionSize int    `json:"maxDistributionSize"`
 	UpdateInterval      int    `json:"updateInterval"`
 	RequestTimeout      int    `json:"requestTimeout"`
+	TokenTimeout        int    `json:"tokenTimeout"`
 	HttpClient          *http.Client
 }
 type Partner struct {
@@ -48,6 +49,8 @@ type Partner struct {
 	OutputPath   string `json:"output_path"`
 	AckPath      string `json:"ack_path"`
 	ErrorPath    string `json:"error_path"`
+	ProgressPath string `json:"progress_path"`
 	Extension    string `json:"extension"`
+	Route        string `json:"route"`
 	InputChannel chan string
 }

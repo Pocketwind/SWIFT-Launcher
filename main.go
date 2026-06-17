@@ -12,6 +12,7 @@ import (
 	"github.com/Pocketwind/SWIFT-Launcher/fsutil"
 	"github.com/Pocketwind/SWIFT-Launcher/httpclient"
 	"github.com/Pocketwind/SWIFT-Launcher/logging"
+	"github.com/Pocketwind/SWIFT-Launcher/messaging"
 	"github.com/Pocketwind/SWIFT-Launcher/useragent"
 )
 
@@ -123,16 +124,41 @@ func main() {
 	}
 
 	//Message Partner 구성
-	for _, partner := range partners {
-		partner.InputChannel = make(chan string, 1000)
-		fsutil.EnsureDir(fsutil.PathHelper(partner.InputPath))
-		fsutil.EnsureDir(fsutil.PathHelper(partner.OutputPath))
-		fsutil.EnsureDir(fsutil.PathHelper(partner.AckPath))
+	for i := range partners {
+		partners[i].InputChannel = make(chan string, 1000)
+		fsutil.EnsureDir(fsutil.PathHelper(partners[i].InputPath))
+		fsutil.EnsureDir(fsutil.PathHelper(partners[i].OutputPath))
+		fsutil.EnsureDir(fsutil.PathHelper(partners[i].AckPath))
+		fsutil.EnsureDir(fsutil.PathHelper(partners[i].ErrorPath))
+		fsutil.EnsureDir(fsutil.PathHelper(partners[i].ProgressPath))
 	}
 
 	//Worker 등록 및 shutdown 함수 생성
 	startTokenService(&wg, settings, tokenData, logCh, exitCmd)
 	shutdown := createShutdown(stopAll, &wg, &shutdownOnce, tokenData, settings, logCh, doneLogger)
+	for _, partner := range partners {
+		//파트너 파일 watcher 시작
+		wg.Add(1)
+		go func(partner *config.Partner) {
+			defer wg.Done()
+			fsutil.WatchFileService(partner, exitCmd, logCh)
+		}(&partner)
+	}
+	//Collector 서비스 시작
+	for _, partner := range partners {
+		//파트너 파일 watcher 시작
+		wg.Add(1)
+		go func(partner *config.Partner) {
+			defer wg.Done()
+			messaging.CollectorService(settings, partner, tokenData, logCh, exitCmd)
+		}(&partner)
+	}
+	//Download 서비스 시작
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		messaging.DownloadService(settings, tokenData, partners, exitCmd, logCh)
+	}()
 
 	//main
 	reader := bufio.NewReader(os.Stdin)

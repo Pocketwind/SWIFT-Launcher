@@ -1,4 +1,4 @@
-package messaging
+package auth
 
 import (
 	"crypto/rand"

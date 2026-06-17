@@ -13,7 +13,6 @@ import (
 
 	"github.com/Pocketwind/SWIFT-Launcher/config"
 	"github.com/Pocketwind/SWIFT-Launcher/logging"
-	"github.com/Pocketwind/SWIFT-Launcher/messaging"
 	jwt "github.com/golang-jwt/jwt/v5"
 )
 
@@ -21,7 +20,7 @@ func TokenService(settings *config.Settings, tokenData *TokenData, logCh chan<- 
 	//초기 실행
 	Auth(settings, tokenData, logCh)
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(time.Duration(settings.Messaging.TokenTimeout) * time.Minute)
 	defer ticker.Stop()
 loop:
 	for {
@@ -202,11 +201,11 @@ func createJWT(tokenData *TokenData) (string, error) {
 		"sub": subject,
 		"exp": expireTime,
 		"iat": currentTime,
-		"jti": messaging.SimpleJTI(),
+		"jti": SimpleJTI(),
 	})
 	token.Header["typ"] = "JWT"
 	token.Header["alg"] = "RS256"
-	x5c, err := messaging.NormalizeToX5C(publicKey)
+	x5c, err := NormalizeToX5C(publicKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to normalize x5c: %v", err)
 	}
