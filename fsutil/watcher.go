@@ -63,6 +63,7 @@ loop:
 }
 
 func enqueueExistingFiles(partner *config.Partner, exitCmd <-chan bool, logCh chan<- logging.LogData) {
+	//input 쌓인거 처리
 	entries, err := os.ReadDir(partner.InputPath)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error reading startup files: %v", err))
@@ -93,4 +94,34 @@ func enqueueExistingFiles(partner *config.Partner, exitCmd <-chan bool, logCh ch
 	}
 
 	logging.Easylog(logCh, "INFO", fmt.Sprintf("Startup scan completed: %s (queued=%d)", partner.InputPath, queued))
+
+	//progress 쌓인거 처리
+	entries, err = os.ReadDir(partner.ProgressPath)
+	if err != nil {
+		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error reading startup files: %v", err))
+		return
+	}
+
+	logging.Easylog(logCh, "INFO", fmt.Sprintf("Startup scan started: %s", partner.ProgressPath))
+	queued = 0
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		fullPath := filepath.Join(partner.ProgressPath, entry.Name())
+		if err := WaitFileReady(fullPath, 10*time.Second); err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Startup file is not ready: %s: %v", fullPath, err))
+			continue
+		}
+		select {
+		case partner.InputChannel <- fullPath:
+			queued++
+			logging.Easylog(logCh, "INFO", fmt.Sprintf("Queued startup file: %s", fullPath))
+		case <-exitCmd:
+			return
+		}
+	}
+
+	logging.Easylog(logCh, "INFO", fmt.Sprintf("Startup scan completed: %s (queued=%d)", partner.ProgressPath, queued))
 }
