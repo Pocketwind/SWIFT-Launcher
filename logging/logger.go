@@ -11,7 +11,7 @@ func Logger(exitCh <-chan bool, logCh <-chan LogData) {
 	logFile, err := os.OpenFile("app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		writer(logFile, LogData{
-			Time: time.Now().Unix(),
+			Time: time.Now().UnixMilli(),
 			Type: "ERROR",
 			Text: fmt.Sprintf("Error opening log file: %v", err),
 		})
@@ -20,7 +20,7 @@ func Logger(exitCh <-chan bool, logCh <-chan LogData) {
 	defer logFile.Close()
 
 	writer(logFile, LogData{
-		Time: time.Now().Unix(),
+		Time: time.Now().UnixMilli(),
 		Type: "INFO",
 		Text: "Logger started",
 	})
@@ -33,11 +33,11 @@ func Logger(exitCh <-chan bool, logCh <-chan LogData) {
 	for {
 		select {
 		case <-exit:
-			writer(logFile, LogData{Time: time.Now().Unix(), Type: "INFO", Text: "Shutdown requested"})
+			writer(logFile, LogData{Time: time.Now().UnixMilli(), Type: "INFO", Text: "Shutdown requested"})
 			exit = nil
 		case logData, ok := <-logCh:
 			if !ok {
-				writer(logFile, LogData{Time: time.Now().Unix(), Type: "INFO", Text: "Logger stopped"})
+				writer(logFile, LogData{Time: time.Now().UnixMilli(), Type: "INFO", Text: "Logger stopped"})
 				return
 			}
 			writer(logFile, logData)
@@ -47,7 +47,7 @@ func Logger(exitCh <-chan bool, logCh <-chan LogData) {
 
 func Easylog(logCh chan<- LogData, logType string, logText string) {
 	logData := LogData{
-		Time: time.Now().Unix(),
+		Time: time.Now().UnixMilli(),
 		Type: logType,
 		Text: logText,
 	}
@@ -60,7 +60,7 @@ func writer(logFile *os.File, logData LogData) {
 	logFile.WriteString(logString)
 }
 
-func timeFormat(seconds int64) string {
-	t := time.Unix(seconds, 0)
-	return t.Format("06-01-02 15:04:05")
+func timeFormat(millis int64) string {
+	t := time.UnixMilli(millis)
+	return t.Format("06-01-02 15:04:05.000")
 }
