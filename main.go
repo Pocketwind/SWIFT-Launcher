@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/Pocketwind/SWIFT-Launcher/auth"
 	"github.com/Pocketwind/SWIFT-Launcher/config"
@@ -14,9 +17,75 @@ import (
 	"github.com/Pocketwind/SWIFT-Launcher/logging"
 	"github.com/Pocketwind/SWIFT-Launcher/messaging"
 	"github.com/Pocketwind/SWIFT-Launcher/useragent"
+	"github.com/kardianos/service"
 )
 
 func main() {
+	svcConfig := &service.Config{
+		Name:        "SWIFT-Launcher-Service",
+		DisplayName: "SWIFT-Launcher-Service",
+		Description: "SWIFT messaging service",
+	}
+
+	prg := &program{}
+	s, err := service.New(prg, svcConfig)
+	if err != nil {
+		fmt.Printf("Failed to create service: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(os.Args) > 1 {
+		cmd := strings.ToLower(os.Args[1])
+		switch cmd {
+		case "install", "uninstall", "start", "stop", "restart":
+			if err := service.Control(s, cmd); err != nil {
+				fmt.Printf("Service %s failed: %v\n", cmd, err)
+				os.Exit(1)
+			}
+			fmt.Printf("Service %s succeeded\n", cmd)
+			return
+		case "status":
+			status := "unknown"
+			currentSt, err := s.Status()
+			if err == nil {
+				if currentSt == service.StatusRunning {
+					status = "running"
+				} else if currentSt == service.StatusStopped {
+					status = "stopped"
+				}
+			}
+			fmt.Printf("Service status: %s\n", status)
+			return
+		case "console":
+			app(true, nil)
+			return
+		case "help":
+			showHelp()
+			return
+		default:
+			showHelp()
+			os.Exit(1)
+		}
+	}
+
+	if service.Interactive() {
+		app(true, nil)
+		return
+	}
+
+	if err := s.Run(); err != nil {
+		fmt.Printf("Service run failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func app(interactive bool, serviceStop <-chan struct{}) {
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		if chdirErr := os.Chdir(exeDir); chdirErr != nil {
+			fmt.Printf("WARN: Failed to set working directory to %s: %v\n", exeDir, chdirErr)
+		}
+	}
 	//logger 채널
 	logCh := make(chan logging.LogData, 10000)
 	logging.Easylog(logCh, "INFO", "Application started")
@@ -126,32 +195,57 @@ func main() {
 	//Message Partner 구성
 	for i := range partners {
 		partners[i].InputChannel = make(chan string, 1000)
-		fsutil.EnsureDir(fsutil.PathHelper(partners[i].InputPath))
-		fsutil.EnsureDir(fsutil.PathHelper(partners[i].OutputPath))
-		fsutil.EnsureDir(fsutil.PathHelper(partners[i].AckPath))
-		fsutil.EnsureDir(fsutil.PathHelper(partners[i].ErrorPath))
-		fsutil.EnsureDir(fsutil.PathHelper(partners[i].ProgressPath))
+		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].InputPath))
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure input directory: %v", err))
+			fmt.Printf("ERROR: Failed to ensure input directory: %v\n", err)
+			return
+		}
+		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].OutputPath))
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure output directory: %v", err))
+			fmt.Printf("ERROR: Failed to ensure output directory: %v\n", err)
+			return
+		}
+		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].AckPath))
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure ack directory: %v", err))
+			fmt.Printf("ERROR: Failed to ensure ack directory: %v\n", err)
+			return
+		}
+		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].ErrorPath))
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure error directory: %v", err))
+			fmt.Printf("ERROR: Failed to ensure error directory: %v\n", err)
+			return
+		}
+		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].ProgressPath))
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure progress directory: %v", err))
+			fmt.Printf("ERROR: Failed to ensure progress directory: %v\n", err)
+			return
+		}
 	}
 
 	//Worker 등록 및 shutdown 함수 생성
 	startTokenService(&wg, settings, tokenData, logCh, exitCmd)
 	shutdown := createShutdown(stopAll, &wg, &shutdownOnce, tokenData, settings, logCh, doneLogger)
-	for _, partner := range partners {
+	for i := range partners {
 		//파트너 파일 watcher 시작
 		wg.Add(1)
 		go func(partner *config.Partner) {
 			defer wg.Done()
 			fsutil.WatchFileService(partner, exitCmd, logCh)
-		}(&partner)
+		}(&partners[i])
 	}
 	//Collector 서비스 시작
-	for _, partner := range partners {
+	for i := range partners {
 		//파트너 파일 watcher 시작
 		wg.Add(1)
 		go func(partner *config.Partner) {
 			defer wg.Done()
 			messaging.CollectorService(settings, partner, tokenData, logCh, exitCmd)
-		}(&partner)
+		}(&partners[i])
 	}
 	//Download 서비스 시작
 	wg.Add(1)
@@ -160,7 +254,36 @@ func main() {
 		messaging.DownloadService(settings, tokenData, partners, exitCmd, logCh)
 	}()
 
-	//main
+	// Ctrl+C / 종료 시그널 처리
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	if !interactive {
+		logging.Easylog(logCh, "INFO", "Service mode enabled")
+		if serviceStop == nil {
+			select {
+			case <-sigCh:
+				shutdown("Stop signal detected. Exiting application...")
+			}
+			return
+		}
+		select {
+		case <-serviceStop:
+			shutdown("Service stop requested. Exiting application...")
+		case <-sigCh:
+			shutdown("Stop signal detected. Exiting application...")
+		}
+		return
+	}
+
+	go func() {
+		<-sigCh
+		shutdown("Ctrl+C detected. Exiting application...")
+		os.Exit(0)
+	}()
+
+	//main (interactive)
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Print("Input: ")
@@ -214,4 +337,40 @@ func startLoggerService(logCh chan logging.LogData, exitCmd chan bool, doneLogge
 		defer close(doneLogger)
 		logging.Logger(exitCmd, logCh)
 	}()
+}
+
+type program struct {
+	stopChan chan struct{}
+	doneChan chan struct{}
+	stopOnce sync.Once
+}
+
+func (p *program) Start(s service.Service) error {
+	p.stopChan = make(chan struct{})
+	p.doneChan = make(chan struct{})
+	go func() {
+		defer close(p.doneChan)
+		app(false, p.stopChan)
+	}()
+	return nil
+}
+
+func (p *program) Stop(s service.Service) error {
+	p.stopOnce.Do(func() {
+		close(p.stopChan)
+	})
+	<-p.doneChan
+	return nil
+}
+
+func showHelp() {
+	fmt.Println("Available commands:")
+	fmt.Println("install   - Install the service")
+	fmt.Println("uninstall - Uninstall the service")
+	fmt.Println("start     - Start the service")
+	fmt.Println("stop      - Stop the service")
+	fmt.Println("restart   - Restart the service")
+	fmt.Println("status    - Show service status")
+	fmt.Println("console   - Run in console mode")
+	fmt.Println("help      - Show this help")
 }
