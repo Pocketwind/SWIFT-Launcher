@@ -35,3 +35,20 @@ type MessageResponse struct {
 	Text                  string `json:"text"`
 	MessageCloudReference string `json:"message_cloud_reference"` //클라우드에서 메시지 검색할때 쓰는 문자열, uetr이랑 다름
 }
+
+//다운로드 고루틴 결과 데이터
+type downloadResult struct {
+	ids []string
+	err error
+}
+type task struct {
+	mtype int
+	ids   []string
+}
+
+const (
+	finMsgTask = iota
+	finReportTask
+	interActMsgTask
+	interActReportTask
+)

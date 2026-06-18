@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Pocketwind/SWIFT-Launcher/auth"
@@ -18,6 +19,12 @@ import (
 
 func DownloadService(settings *config.Settings, tokenData *auth.TokenData, partners []config.Partner, exitCmd <-chan bool, logCh chan<- logging.LogData) {
 	logging.Easylog(logCh, "INFO", "Starting Download Service")
+	if settings.Messaging.UpdateInterval <= 0 {
+		logging.Easylog(logCh, "INFO", "Update interval is set to 0 or negative. Download service will not run automatically.")
+		<-exitCmd
+		logging.Easylog(logCh, "INFO", "Download Service Stopped")
+		return
+	}
 	ticker := time.NewTicker(time.Duration(settings.Messaging.UpdateInterval) * time.Second)
 	defer ticker.Stop()
 loop:
@@ -95,19 +102,82 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 			fileActPartners = append(fileActPartners, partner)
 		}
 	}
-	go downloadFINMessages(settings, tokenData, finMessages, finPartners, logCh)
-	go downloadFINReports(settings, tokenData, finReports, finPartners, logCh)
-	go downloadInterActMessages(settings, tokenData, interactMessages, interactPartners, logCh)
-	go downloadInterActReports(settings, tokenData, interactReports, interactPartners, logCh)
-	//go downloadFileActMessages(settings, tokenData, fileActMessages, fileActPartners, logCh)
-	//go downloadFileActReports(settings, tokenData, fileActReports, fileActPartners, logCh)
 
-	return nil
+	//고루틴 중복호출 문제
+	/*
+		go downloadFINMessages(settings, tokenData, finMessages, finPartners, logCh)
+		go downloadFINReports(settings, tokenData, finReports, finPartners, logCh)
+		go downloadInterActMessages(settings, tokenData, interactMessages, interactPartners, logCh)
+		go downloadInterActReports(settings, tokenData, interactReports, interactPartners, logCh)
+		//go downloadFileActMessages(settings, tokenData, fileActMessages, fileActPartners, logCh)
+		//go downloadFileActReports(settings, tokenData, fileActReports, fileActPartners, logCh)
+	*/
+
+	var wg sync.WaitGroup
+	results := make(chan downloadResult, 4)
+
+	tasks := []task{
+		{mtype: finMsgTask, ids: finMessages},
+		{mtype: finReportTask, ids: finReports},
+		{mtype: interActMsgTask, ids: interactMessages},
+		{mtype: interActReportTask, ids: interactReports},
+	}
+
+	for _, t := range tasks {
+		if len(t.ids) == 0 {
+			continue
+		}
+
+		wg.Add(1)
+		go func(t task) {
+			defer wg.Done()
+
+			var err error
+			switch t.mtype {
+			case finMsgTask:
+				err = downloadFINMessages(settings, tokenData, finMessages, finPartners, logCh)
+			case finReportTask:
+				err = downloadFINReports(settings, tokenData, finReports, finPartners, logCh)
+			case interActMsgTask:
+				err = downloadInterActMessages(settings, tokenData, interactMessages, interactPartners, logCh)
+			case interActReportTask:
+				err = downloadInterActReports(settings, tokenData, interactReports, interactPartners, logCh)
+			}
+
+			results <- downloadResult{ids: t.ids, err: err}
+		}(t)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	ackSet := make(map[string]struct{})
+	var firstErr error
+
+	for r := range results {
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+			continue
+		}
+		for _, id := range r.ids {
+			ackSet[id] = struct{}{}
+		}
+	}
+
+	ackIDs := make([]string, 0, len(ackSet))
+	for id := range ackSet {
+		ackIDs = append(ackIDs, id)
+	}
+	if len(ackIDs) > 0 {
+		MultiAck(settings, tokenData, ackIDs, logCh)
+	}
+
+	return firstErr
 }
 
-func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) {
+func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) error {
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 	//Auth
 	tokenData.RLock()
@@ -124,7 +194,7 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating request: %v", err))
-		return
+		return err
 	}
 	//param
 	query := req.URL.Query()
@@ -138,7 +208,7 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 	resp, err := client.Do(req)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return
+		return err
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
@@ -156,7 +226,7 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 	err = json.Unmarshal(response, &downloads)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error unmarshalling response for distribution %s: %v", ranges, err))
-		return
+		return err
 	}
 	//전문 생성 및 라우팅
 	for _, message := range downloads {
@@ -182,13 +252,14 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 			}
 		}
 	}
-	//ACK 처리
-	MultiAck(settings, tokenData, ids, logCh)
+	//ACK 처리 변경
+	//MultiAck(settings, tokenData, ids, logCh)
+	return nil
 }
 
-func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) {
+func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) error {
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 	//Auth
 	tokenData.RLock()
@@ -204,7 +275,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating request: %v", err))
-		return
+		return err
 	}
 	//param
 	query := req.URL.Query()
@@ -218,7 +289,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 	resp, err := client.Do(req)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return
+		return err
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
@@ -228,7 +299,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 		err = os.WriteFile(filePath, response, 0644)
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %s: %v", ranges, err))
-			return
+			return err
 		}
 	*/
 	//payload 분리
@@ -236,7 +307,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 	err = json.Unmarshal(response, &reports)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error unmarshalling response for distribution %s: %v", ranges, err))
-		return
+		return err
 	}
 	//전문 생성 및 라우팅
 	for _, report := range reports {
@@ -263,12 +334,13 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 		}
 	}
 	//ACK 처리
-	MultiAck(settings, tokenData, ids, logCh)
+	//MultiAck(settings, tokenData, ids, logCh)
+	return nil
 }
 
-func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) {
+func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) error {
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 	//Auth
 	tokenData.RLock()
@@ -284,7 +356,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating request: %v", err))
-		return
+		return err
 	}
 	//param
 	query := req.URL.Query()
@@ -298,7 +370,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 	resp, err := client.Do(req)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return
+		return err
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
@@ -308,7 +380,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 		err = os.WriteFile(filePath, response, 0644)
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %s: %v", ranges, err))
-			return
+			return err
 		}
 	*/
 
@@ -317,7 +389,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 	err = json.Unmarshal(response, &reports)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error unmarshalling response for distribution %s: %v", ranges, err))
-		return
+		return err
 	}
 
 	//전문 생성 및 라우팅
@@ -346,12 +418,13 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 	}
 
 	//ACK 처리
-	MultiAck(settings, tokenData, ids, logCh)
+	//MultiAck(settings, tokenData, ids, logCh)
+	return nil
 }
 
-func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) {
+func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) error {
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 
 	tokenData.RLock()
@@ -367,7 +440,7 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating request: %v", err))
-		return
+		return err
 	}
 	//param
 	query := req.URL.Query()
@@ -381,7 +454,7 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 	resp, err := client.Do(req)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return
+		return err
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
@@ -400,7 +473,7 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 	err = json.Unmarshal(response, &downloads)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error unmarshalling response for distribution %s: %v", ranges, err))
-		return
+		return err
 	}
 
 	//전문 생성 및 라우팅
@@ -429,7 +502,8 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 	}
 
 	//ACK 처리
-	MultiAck(settings, tokenData, ids, logCh)
+	//MultiAck(settings, tokenData, ids, logCh)
+	return nil
 }
 
 func GetDistributions(settings *config.Settings, tokenData *auth.TokenData, logCh chan<- logging.LogData) (*Distributions, error) {
