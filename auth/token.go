@@ -20,7 +20,14 @@ func TokenService(settings *config.Settings, tokenData *TokenData, logCh chan<- 
 	//초기 실행
 	Auth(settings, tokenData, logCh)
 
-	ticker := time.NewTicker(time.Duration(settings.Messaging.TokenTimeout) * time.Minute)
+	//ticker 0인지 확인
+	if settings.Messaging.TokenTimeout <= 0 {
+		logging.Easylog(logCh, "INFO", "Token timeout is set to 0 or negative. Token service will not refresh tokens automatically.")
+		<-exitCmd
+		logging.Easylog(logCh, "INFO", "Token Service Stopped")
+		return
+	}
+	ticker := time.NewTicker(time.Duration(settings.Messaging.TokenTimeout) * time.Second)
 	defer ticker.Stop()
 loop:
 	for {
