@@ -7,6 +7,7 @@ import (
 )
 
 func Logger(exitCh <-chan bool, logCh <-chan LogData) {
+	//로그 로테이션 검사
 	//로그 파일 생성
 	logFile, err := os.OpenFile("app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -14,6 +15,19 @@ func Logger(exitCh <-chan bool, logCh <-chan LogData) {
 		return
 	}
 	defer logFile.Close()
+
+	//로그파일 크기 넘으면 로테이션
+	const maxLogSize = 10 * 1024 * 1024 // 10MB
+	info, err := logFile.Stat()
+	if err == nil && info.Size() > maxLogSize {
+		logFile.Close()
+		os.Rename("app.log", fmt.Sprintf("app.log.%s", time.Now().Format("20060102150405")))
+		logFile, err = os.OpenFile("app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Printf("Error opening log file: %v\n", err)
+			return
+		}
+	}
 
 	writer(logFile, LogData{
 		Time: time.Now().UnixMilli(),
