@@ -10,11 +10,7 @@ func Logger(exitCh <-chan bool, logCh <-chan LogData) {
 	//로그 파일 생성
 	logFile, err := os.OpenFile("app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		writer(logFile, LogData{
-			Time: time.Now().UnixMilli(),
-			Type: "ERROR",
-			Text: fmt.Sprintf("Error opening log file: %v", err),
-		})
+		fmt.Printf("Error opening log file: %v\n", err)
 		return
 	}
 	defer logFile.Close()
