@@ -43,7 +43,11 @@ loop:
 					continue
 				}
 				//event.Name이 파일 들어온 경로
-				WaitFileReady(event.Name, 10*time.Second) //파일이 완전히 쓰여질 때까지 대기
+				err = WaitFileReady(event.Name, 10*time.Second) //파일이 완전히 쓰여질 때까지 대기
+				if err != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("File is not ready: %s: %v", event.Name, err))
+					continue
+				}
 				select {
 				case partner.InputChannel <- event.Name:
 				case <-exitCmd:
