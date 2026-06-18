@@ -20,14 +20,21 @@ loop:
 			if fsutil.GetFileExt(filePath) != partner.Extension {
 				logging.Easylog(logCh, "ERROR", "Skipping file with unsupported extension: "+filePath+" ("+partner.Name+")")
 				errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-				os.Rename(fsutil.PathHelper(filePath), errorPath)
+				err := os.Rename(fsutil.PathHelper(filePath), errorPath)
+				if err != nil {
+					logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+				}
 				continue
 			}
 			//맞는 파일 처리
 			logging.Easylog(logCh, "INFO", "Processing file: "+filePath+" ("+partner.Name+")")
 			//in_progress로 이동
 			progressPath := fsutil.PathHelper(partner.ProgressPath + "/" + fsutil.GetFileName(filePath))
-			os.Rename(fsutil.PathHelper(filePath), progressPath)
+			err := os.Rename(fsutil.PathHelper(filePath), progressPath)
+			if err != nil {
+				logging.Easylog(logCh, "ERROR", "Failed to move file to progress directory: "+err.Error())
+				continue
+			}
 			switch partner.Type {
 			case "interAct": //MX
 				err := processMXFile(settings, progressPath, partner, tokenData, logCh)
@@ -54,7 +61,10 @@ func processMXFile(settings *config.Settings, filePath string, partner *config.P
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", "Failed to create MX data: "+err.Error())
 		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-		os.Rename(fsutil.PathHelper(filePath), errorPath)
+		err := os.Rename(fsutil.PathHelper(filePath), errorPath)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+		}
 		return err
 	}
 
@@ -63,13 +73,19 @@ func processMXFile(settings *config.Settings, filePath string, partner *config.P
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", "Failed to send MX message: "+err.Error())
 		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-		os.Rename(fsutil.PathHelper(filePath), errorPath)
+		err := os.Rename(fsutil.PathHelper(filePath), errorPath)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+		}
 		return err
 	}
 
 	//완료
 	logging.Easylog(logCh, "INFO", "MX message sent successfully. Response: "+response)
-	os.Remove(fsutil.PathHelper(filePath))
+	err = os.Remove(fsutil.PathHelper(filePath))
+	if err != nil {
+		logging.Easylog(logCh, "ERROR", "Failed to remove file: "+err.Error())
+	}
 	return nil
 }
 
@@ -79,7 +95,10 @@ func processMTFile(settings *config.Settings, filePath string, partner *config.P
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", "Failed to create MT data: "+err.Error())
 		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-		os.Rename(fsutil.PathHelper(filePath), errorPath)
+		err := os.Rename(fsutil.PathHelper(filePath), errorPath)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+		}
 		return err
 	}
 
@@ -88,12 +107,18 @@ func processMTFile(settings *config.Settings, filePath string, partner *config.P
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", "Failed to send MT message: "+err.Error())
 		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-		os.Rename(fsutil.PathHelper(filePath), errorPath)
+		err := os.Rename(fsutil.PathHelper(filePath), errorPath)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+		}
 		return err
 	}
 
 	//완료
 	logging.Easylog(logCh, "INFO", "MT message sent successfully. Response: "+response)
-	os.Remove(fsutil.PathHelper(filePath))
+	err = os.Remove(fsutil.PathHelper(filePath))
+	if err != nil {
+		logging.Easylog(logCh, "ERROR", "Failed to remove file: "+err.Error())
+	}
 	return nil
 }
