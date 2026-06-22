@@ -51,6 +51,11 @@ type Partner struct {
 	ErrorPath    string `json:"error_path"`
 	ProgressPath string `json:"progress_path"`
 	Extension    string `json:"extension"`
-	Route        string `json:"route"`
+	Route        Route  `json:"route"`
 	InputChannel chan string
+}
+type Route struct {
+	Sender      string `json:"sender"`
+	Receiver    string `json:"receiver"`
+	MessageType string `json:"message_type"`
 }
