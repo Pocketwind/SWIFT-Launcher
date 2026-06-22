@@ -13,7 +13,7 @@ import (
 	"github.com/Pocketwind/SWIFT-Launcher/logging"
 )
 
-func MTSender(mdata MTData, token *auth.TokenData, settings *config.Settings, logCh chan<- logging.LogData) (string, error) {
+func MTSender(mdata MTData, token *auth.TokenData, settings *config.Settings, logCh chan<- logging.LogData, isPDE bool) (string, error) {
 	token.RLock()
 	privateKey := token.PrivateKey
 	publicKey := token.PublicKey
@@ -25,14 +25,19 @@ func MTSender(mdata MTData, token *auth.TokenData, settings *config.Settings, lo
 	payloadB64 := base64.StdEncoding.EncodeToString([]byte(mdata.Payload))
 
 	//json body 만들기
-	bodyMap := map[string]string{
-		"sender_reference": mdata.SenderReference,
-		"sender":           mdata.Sender,
-		"receiver":         mdata.Receiver,
-		"message_type":     mdata.MessageType,
-		"payload":          payloadB64,
-	}
-	bodyBytes, err := json.Marshal(bodyMap)
+	mdata.Payload = payloadB64
+	mdata.NetworkInfo.PossibleDuplicate = isPDE
+	bodyBytes, err := json.Marshal(mdata)
+	/*
+		bodyMap := map[string]string{
+			"sender_reference": mdata.SenderReference,
+			"sender":           mdata.Sender,
+			"receiver":         mdata.Receiver,
+			"message_type":     mdata.MessageType,
+			"payload":          payloadB64,
+		}
+		bodyBytes, err := json.Marshal(bodyMap)
+	*/
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error marshaling request body: %v", err))
 		return "Error marshaling request body", err
@@ -77,13 +82,14 @@ func MTSender(mdata MTData, token *auth.TokenData, settings *config.Settings, lo
 
 	if messageResponse.MessageCloudReference == "" {
 		logging.Easylog(logCh, "ERROR", "message_cloud_reference not found in response")
+		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Response body: %s", string(response)))
 		return "message_cloud_reference not found in response", fmt.Errorf("message_cloud_reference not found in response")
 	}
 
 	return messageResponse.MessageCloudReference, nil
 }
 
-func MXSender(mdata MXData, token *auth.TokenData, settings *config.Settings, logCh chan<- logging.LogData) (string, error) {
+func MXSender(mdata MXData, token *auth.TokenData, settings *config.Settings, logCh chan<- logging.LogData, isPDE bool) (string, error) {
 	token.RLock()
 	privateKey := token.PrivateKey
 	publicKey := token.PublicKey
@@ -94,16 +100,22 @@ func MXSender(mdata MXData, token *auth.TokenData, settings *config.Settings, lo
 	//base64
 	payloadB64 := base64.StdEncoding.EncodeToString([]byte(mdata.Payload))
 	//json body
-	bodyMap := map[string]string{
-		"service_code":     mdata.ServiceCode,
-		"payload":          payloadB64,
-		"sender_reference": mdata.SenderReference,
-		"message_type":     mdata.MessageType,
-		"requestor":        mdata.Requestor,
-		"responder":        mdata.Responder,
-		"format":           "MX",
-	}
-	bodyBytes, err := json.Marshal(bodyMap)
+	/*
+		bodyMap := map[string]string{
+			"service_code":     mdata.ServiceCode,
+			"payload":          payloadB64,
+			"sender_reference": mdata.SenderReference,
+			"message_type":     mdata.MessageType,
+			"requestor":        mdata.Requestor,
+			"responder":        mdata.Responder,
+			"format":           "MX",
+		}
+		bodyBytes, err := json.Marshal(bodyMap)
+	*/
+	mdata.Format = "MX"
+	mdata.Payload = payloadB64
+	mdata.NetworkInfo.PossibleDuplicate = isPDE
+	bodyBytes, err := json.Marshal(mdata)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error marshaling request body: %v", err))
 		return "Error marshaling request body", err
@@ -148,6 +160,7 @@ func MXSender(mdata MXData, token *auth.TokenData, settings *config.Settings, lo
 
 	if messageResponse.MessageCloudReference == "" {
 		logging.Easylog(logCh, "ERROR", "message_cloud_reference not found in response")
+		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Response body: %s", string(response)))
 		return "message_cloud_reference not found in response", fmt.Errorf("message_cloud_reference not found in response")
 	}
 

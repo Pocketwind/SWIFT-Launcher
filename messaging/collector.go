@@ -28,6 +28,8 @@ loop:
 			}
 			//맞는 파일 처리
 			logging.Easylog(logCh, "INFO", "Processing file: "+filePath+" ("+partner.Name+")")
+			//PDE 체크(progress에 있으면 PDE붙이기)
+			isPDE := fsutil.IsPathUnderDir(filePath, partner.ProgressPath)
 			//in_progress로 이동
 			progressPath := fsutil.PathHelper(partner.ProgressPath + "/" + fsutil.GetFileName(filePath))
 			err := os.Rename(fsutil.PathHelper(filePath), progressPath)
@@ -37,12 +39,12 @@ loop:
 			}
 			switch partner.Type {
 			case "interAct": //MX
-				err := processMXFile(settings, progressPath, partner, tokenData, logCh)
+				err := processMXFile(settings, progressPath, partner, tokenData, logCh, isPDE)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", "Failed to process MX file: "+err.Error())
 				}
 			case "fin": //MT
-				err := processMTFile(settings, progressPath, partner, tokenData, logCh)
+				err := processMTFile(settings, progressPath, partner, tokenData, logCh, isPDE)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", "Failed to process MT file: "+err.Error())
 				}
@@ -55,7 +57,7 @@ loop:
 	logging.Easylog(logCh, "INFO", "Collector Stopped for partner: "+partner.Name)
 }
 
-func processMXFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData) error {
+func processMXFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
 	//MX 데이터 생성
 	mxdata, err := MXDataMaker(filePath, logCh)
 	if err != nil {
@@ -69,7 +71,7 @@ func processMXFile(settings *config.Settings, filePath string, partner *config.P
 	}
 
 	//send
-	response, err := MXSender(mxdata, tokenData, settings, logCh)
+	response, err := MXSender(mxdata, tokenData, settings, logCh, isPDE)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", "Failed to send MX message: "+err.Error())
 		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
@@ -81,7 +83,11 @@ func processMXFile(settings *config.Settings, filePath string, partner *config.P
 	}
 
 	//완료
-	logging.Easylog(logCh, "INFO", "MX message sent successfully. Response: "+response)
+	if isPDE {
+		logging.Easylog(logCh, "WARN", "MX message sent successfully with PDE. Response: "+response)
+	} else {
+		logging.Easylog(logCh, "INFO", "MX message sent successfully. Response: "+response)
+	}
 	err = os.Remove(fsutil.PathHelper(filePath))
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", "Failed to remove file: "+err.Error())
@@ -89,7 +95,7 @@ func processMXFile(settings *config.Settings, filePath string, partner *config.P
 	return nil
 }
 
-func processMTFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData) error {
+func processMTFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
 	//MT 데이터 생성
 	mtdata, err := MTDataMaker(filePath, logCh)
 	if err != nil {
@@ -103,7 +109,7 @@ func processMTFile(settings *config.Settings, filePath string, partner *config.P
 	}
 
 	//send
-	response, err := MTSender(mtdata, tokenData, settings, logCh)
+	response, err := MTSender(mtdata, tokenData, settings, logCh, isPDE)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", "Failed to send MT message: "+err.Error())
 		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
@@ -115,7 +121,11 @@ func processMTFile(settings *config.Settings, filePath string, partner *config.P
 	}
 
 	//완료
-	logging.Easylog(logCh, "INFO", "MT message sent successfully. Response: "+response)
+	if isPDE {
+		logging.Easylog(logCh, "WARN", "MT message sent successfully with PDE. Response: "+response)
+	} else {
+		logging.Easylog(logCh, "INFO", "MT message sent successfully. Response: "+response)
+	}
 	err = os.Remove(fsutil.PathHelper(filePath))
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", "Failed to remove file: "+err.Error())

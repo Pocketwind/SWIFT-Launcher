@@ -102,3 +102,56 @@ func FormatXMLString(raw string) (string, error) {
 
 	return formatted, nil
 }
+
+// 비어있는 map 값 재귀로 제거하기
+func RemoveEmptyValues(m map[string]interface{}) map[string]interface{} {
+	for k, v := range m {
+		switch vTyped := v.(type) {
+		case map[string]interface{}:
+			// 재귀적으로 비어있는 값 제거
+			m[k] = RemoveEmptyValues(vTyped)
+			// 비어있는 map이면 제거
+			if len(m[k].(map[string]interface{})) == 0 {
+				delete(m, k)
+			}
+		case []interface{}:
+			// 슬라이스의 각 요소에 대해 재귀적으로 비어있는 값 제거
+			for i, item := range vTyped {
+				if itemMap, ok := item.(map[string]interface{}); ok {
+					vTyped[i] = RemoveEmptyValues(itemMap)
+				}
+			}
+			// 비어있는 슬라이스이면 제거
+			if len(vTyped) == 0 {
+				delete(m, k)
+			}
+		default:
+			// nil 값이면 제거
+			if v == nil {
+				delete(m, k)
+			}
+		}
+	}
+	return m
+}
+
+func IsPathUnderDir(filePath string, dirPath string) bool {
+	if strings.TrimSpace(dirPath) == "" {
+		return false
+	}
+
+	fileClean := filepath.Clean(filepath.FromSlash(filePath))
+	dirClean := filepath.Clean(filepath.FromSlash(dirPath))
+
+	rel, err := filepath.Rel(dirClean, fileClean)
+	if err != nil {
+		return false
+	}
+
+	if rel == "." {
+		return true
+	}
+
+	upPrefix := ".." + string(filepath.Separator)
+	return rel != ".." && !strings.HasPrefix(rel, upPrefix)
+}
