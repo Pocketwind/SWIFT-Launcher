@@ -227,6 +227,8 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 		}
 	}
 
+	//토큰 먼저 발급받고 실행
+	auth.Auth(settings, tokenData, logCh)
 	//Worker 등록 및 shutdown 함수 생성
 	startTokenService(&wg, settings, tokenData, logCh, exitCmd)
 	shutdown := createShutdown(stopAll, &wg, &shutdownOnce, tokenData, settings, logCh, doneLogger)
@@ -293,7 +295,7 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 		case "exit":
 			shutdown("Exit command received. Exiting application...")
 			return
-		case "1":
+		case "info":
 			tokenData.RLock()
 			msgPurpose := tokenData.TokenPurpose
 			msgAccessToken := tokenData.AccessToken
@@ -302,10 +304,10 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 			fmt.Println("----------------------------------------------")
 			fmt.Printf("%s Token: %s\n", msgPurpose, msgAccessToken)
 			fmt.Println("----------------------------------------------")
-		case "2":
+		case "refresh":
 			//인증서 갱신
 			auth.GetCert(settings, tokenData, logCh)
-		case "3":
+		case "certinfo":
 			//인증서 정보 출력
 			auth.GetCertInfo(publicKey)
 		}
