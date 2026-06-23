@@ -102,12 +102,21 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 	}
 	doneLogger := make(chan struct{})
 	startLoggerService(logCh, exitCmd, doneLogger)
+	shutdownEarly := func(reason string) {
+		stopAll(reason)
+		close(logCh)
+		<-doneLogger
+		if !interactive {
+			os.Exit(1)
+		}
+	}
 
 	//settings 로드
 	settings, err := config.LoadSettings("settings.json")
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to load settings: %v", err))
 		fmt.Printf("ERROR: Failed to load settings: %v\n", err)
+		shutdownEarly("Startup aborted: failed to load settings")
 		return
 	}
 	logging.Easylog(logCh, "INFO", "Settings loaded successfully")
@@ -119,7 +128,7 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 	partners, err := config.LoadPartners(settings.Messaging.PartnerFilePath)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to load partner file: %v", err))
-		fmt.Printf("ERROR: Failed to load partner file: %v\n", err)
+		shutdownEarly("Startup aborted: failed to load partner file")
 		return
 	}
 	logging.Easylog(logCh, "INFO", "Partner file loaded successfully")
@@ -128,12 +137,21 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 	_, errCert := os.Stat("pem/channel.cer")
 	_, errKey := os.Stat("pem/channel.key")
 	if os.IsNotExist(errCert) || os.IsNotExist(errKey) {
-		logging.Easylog(logCh, "INFO", "No channel certificate found. Starting certificate setup...")
-		fmt.Println("No channel certificate found. Starting certificate setup...")
-		err := auth.GetCert(settings, nil, logCh)
-		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to get certificate: %v", err))
-			fmt.Printf("ERROR: Failed to get certificate: %v\n", err)
+		if interactive {
+			logging.Easylog(logCh, "INFO", "No channel certificate found. Starting certificate setup...")
+			fmt.Println("No channel certificate found. Starting certificate setup...")
+			err := auth.GetCert(settings, nil, logCh)
+			if err != nil {
+				logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to get certificate: %v", err))
+				fmt.Printf("ERROR: Failed to get certificate: %v\n", err)
+				shutdownEarly("Startup aborted: certificate setup failed")
+				return
+			}
+		} else {
+			logging.Easylog(logCh, "ERROR", "No channel certificate found. Please run the application in interactive mode to set up the certificate.")
+			fmt.Println("ERROR: No channel certificate found. Please run the application in interactive mode to set up the certificate.")
+			//서비스모드 인증서 없으면 강제종료
+			shutdownEarly("Startup aborted: channel certificate missing in service mode")
 			return
 		}
 	}
@@ -143,12 +161,14 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to read public key file: %v", err))
 		fmt.Printf("ERROR: Failed to read public key file: %v\n", err)
+		shutdownEarly("Startup aborted: failed to read public key file")
 		return
 	}
 	privateKeyBytes, err := os.ReadFile("pem/channel.key")
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to read private key file: %v", err))
 		fmt.Printf("ERROR: Failed to read private key file: %v\n", err)
+		shutdownEarly("Startup aborted: failed to read private key file")
 		return
 	}
 	publicKey := string(publicKeyBytes)
@@ -158,6 +178,7 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 	settings.Messaging.Subject, err = auth.GetCertDN(publicKey)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to extract DN from certificate: %v", err))
+		shutdownEarly("Startup aborted: failed to extract certificate DN")
 		return
 	}
 	logging.Easylog(logCh, "INFO", "Channel Certificates loaded successfully")
