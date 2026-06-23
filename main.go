@@ -192,37 +192,54 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 		PublicKey:      publicKey,
 	}
 
-	//Message Partner 구성
+	//IO 파트너 구분
+	var inputPartners []config.Partner
+	var outputPartners []config.Partner
 	for i := range partners {
-		partners[i].InputChannel = make(chan string, 1000)
-		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].InputPath))
+		switch partners[i].Direction {
+		case "in":
+			partners[i].InputChannel = make(chan string, 1000)
+			inputPartners = append(inputPartners, partners[i])
+		case "out":
+			outputPartners = append(outputPartners, partners[i])
+		default:
+			logging.Easylog(logCh, "WARN", fmt.Sprintf("Unknown partner direction for %s: %s", partners[i].Name, partners[i].Direction))
+		}
+	}
+
+	//Input Partner 구성
+	for i := range inputPartners {
+		err = fsutil.EnsureDir(fsutil.PathHelper(inputPartners[i].InputPath))
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure input directory: %v", err))
 			fmt.Printf("ERROR: Failed to ensure input directory: %v\n", err)
 			return
 		}
-		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].OutputPath))
-		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure output directory: %v", err))
-			fmt.Printf("ERROR: Failed to ensure output directory: %v\n", err)
-			return
-		}
-		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].AckPath))
+		err = fsutil.EnsureDir(fsutil.PathHelper(inputPartners[i].AckPath))
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure ack directory: %v", err))
 			fmt.Printf("ERROR: Failed to ensure ack directory: %v\n", err)
 			return
 		}
-		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].ErrorPath))
+		err = fsutil.EnsureDir(fsutil.PathHelper(inputPartners[i].ErrorPath))
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure error directory: %v", err))
 			fmt.Printf("ERROR: Failed to ensure error directory: %v\n", err)
 			return
 		}
-		err = fsutil.EnsureDir(fsutil.PathHelper(partners[i].ProgressPath))
+		err = fsutil.EnsureDir(fsutil.PathHelper(inputPartners[i].ProgressPath))
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure progress directory: %v", err))
 			fmt.Printf("ERROR: Failed to ensure progress directory: %v\n", err)
+			return
+		}
+	}
+	//Output Partner 구성
+	for i := range outputPartners {
+		err = fsutil.EnsureDir(fsutil.PathHelper(outputPartners[i].OutputPath))
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure output directory: %v", err))
+			fmt.Printf("ERROR: Failed to ensure output directory: %v\n", err)
 			return
 		}
 	}
@@ -240,16 +257,16 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 			fsutil.WatchFileService(partner, exitCmd, logCh)
 		}(&partners[i])
 	}
-	//Collector 서비스 시작
-	for i := range partners {
+	//Collector 서비스 시작 (Input)
+	for i := range inputPartners {
 		//파트너 파일 watcher 시작
 		wg.Add(1)
 		go func(partner *config.Partner) {
 			defer wg.Done()
 			messaging.CollectorService(settings, partner, tokenData, logCh, exitCmd)
-		}(&partners[i])
+		}(&inputPartners[i])
 	}
-	//Download 서비스 시작
+	//Download 서비스 시작(Output)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

@@ -51,8 +51,57 @@ const (
 	finReportTask
 	interActMsgTask
 	interActReportTask
+	fileActMsgTask
+	fileActReportTask
 )
 
 type InterfaceInfo struct {
 	ProductInfo string `json:"product_info,omitempty"`
+}
+
+//FA
+type FAData struct {
+	FileTransferRequest FileTransferRequest `json:"file_transfer_request"`
+	CompanionInfo       CompanionInfo       `json:"companion_info"`
+}
+type FileTransferRequest struct {
+	FileAttributes       FileAttributes       `json:"file_attributes"`
+	FileOperation        FileOperation        `json:"file_operation"`
+	EncryptionAttributes EncryptionAttributes `json:"encryption_attributes"`
+}
+type CompanionInfo struct {
+	SenderReference string `json:"sender_reference"`
+	ServiceCode     string `json:"service_code,omitempty"`
+	MessageType     string `json:"message_type"`
+	Requestor       string `json:"requestor,omitempty"`
+	Responder       string `json:"responder,omitempty"`
+	FileLogicalName string `json:"file_logical_name"` //클라우드에 등록될 이름
+	//Body            string      `json:"body,omitempty"`    //실제 파일이름
+	NetworkInfo NetworkInfo `json:"network_info,omitempty"`
+}
+type FileAttributes struct {
+	FileName      string `json:"file_name"`
+	FileDigestAlg string `json:"file_digest_alg,omitempty"`
+	FileDigest    string `json:"file_digest,omitempty"`
+	FileSize      int    `json:"file_size,omitempty"`
+}
+type FileOperation struct {
+	Type string `json:"type"` //upload, download
+}
+type EncryptionAttributes struct {
+	KeyAlg       string `json:"key_alg"`
+	KeyValue     string `json:"key_value"`
+	KeyDigestAlg string `json:"key_digest_alg"`
+	KeyDigest    string `json:"key_digest"`
+}
+type FileActInitiateResponse struct {
+	FileTransferResponse FileTransferResponse `json:"file_transfer_response"`
+	TransferID           string               `json:"transfer_id"`
+}
+type FileTransferResponse struct {
+	SignedURLs []SignedURL `json:"signed_urls"`
+}
+type SignedURL struct {
+	Part int    `json:"part"`
+	URL  string `json:"url"`
 }

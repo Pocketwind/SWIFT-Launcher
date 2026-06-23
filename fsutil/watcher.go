@@ -27,8 +27,10 @@ func WatchFileService(partner *config.Partner, exitCmd <-chan bool, logCh chan<-
 		return
 	}
 
-	// Process files that were already present while the program was down.
-	enqueueExistingFiles(partner, exitCmd, logCh)
+	//Input 파트너 progress에 있는더 enqueue
+	if partner.Direction == "in" {
+		enqueueExistingFiles(partner, exitCmd, logCh)
+	}
 
 loop:
 	for {

@@ -1,6 +1,8 @@
 package config
 
-import "net/http"
+import (
+	"net/http"
+)
 
 type Settings struct {
 	//User-Agent 관련 설정
@@ -41,9 +43,12 @@ type Messaging struct {
 	TokenTimeout        int    `json:"tokenTimeout"`
 	HttpClient          *http.Client
 }
+
+// 파트너
 type Partner struct {
 	Name         string `json:"name"`
 	Description  string `json:"description"`
+	Direction    string `json:"direction"` //in, out
 	Type         string `json:"type"`
 	InputPath    string `json:"input_path"`
 	OutputPath   string `json:"output_path"`
@@ -53,9 +58,22 @@ type Partner struct {
 	Extension    string `json:"extension"`
 	Route        Route  `json:"route"`
 	InputChannel chan string
+	DFAInfo      DFAInfo `json:"network_info,omitempty"`
+	IsDFA        bool    `json:"is_dfa"`
 }
 type Route struct {
 	Sender      string `json:"sender"`
 	Receiver    string `json:"receiver"`
 	MessageType string `json:"message_type"`
+}
+type DFAInfo struct {
+	RequestType         string `json:"request_type,omitempty"`
+	TransferDescription string `json:"transfer_description,omitempty"`
+	TransferInfo        string `json:"transfer_info,omitempty"`
+	FileDescription     string `json:"file_description,omitempty"`
+	FileInfo            string `json:"file_info,omitempty"`
+	HeaderInfo          string `json:"header_info,omitempty"`
+	ServiceCode         string `json:"service_code,omitempty"`
+	Requestor           string `json:"requestor,omitempty"`
+	Responder           string `json:"responder,omitempty"`
 }

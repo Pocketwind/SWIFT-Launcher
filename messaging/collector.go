@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/Pocketwind/SWIFT-Launcher/auth"
@@ -19,11 +20,13 @@ loop:
 			//파일 확장자 체크
 			if fsutil.GetFileExt(filePath) != partner.Extension {
 				logging.Easylog(logCh, "ERROR", "Skipping file with unsupported extension: "+filePath+" ("+partner.Name+")")
-				errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-				err := os.Rename(fsutil.PathHelper(filePath), errorPath)
-				if err != nil {
-					logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
-				}
+				/*
+					errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
+					err := os.Rename(fsutil.PathHelper(filePath), errorPath)
+					if err != nil {
+						logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+					}
+				*/
 				continue
 			}
 			//맞는 파일 처리
@@ -49,6 +52,17 @@ loop:
 					logging.Easylog(logCh, "ERROR", "Failed to process MT file: "+err.Error())
 				}
 			case "fileAct": //FileAct
+				if partner.IsDFA { //DFA
+					err := processDFAFile(settings, progressPath, partner, tokenData, logCh, isPDE)
+					if err != nil {
+						logging.Easylog(logCh, "ERROR", "Failed to process DFA file: "+err.Error())
+					}
+				} else { //일반 FA
+					err := processFileActFile(settings, progressPath, partner, tokenData, logCh, isPDE)
+					if err != nil {
+						logging.Easylog(logCh, "ERROR", "Failed to process FileAct file: "+err.Error())
+					}
+				}
 			}
 		case <-exitCmd:
 			break loop
@@ -57,29 +71,59 @@ loop:
 	logging.Easylog(logCh, "INFO", "Collector Stopped for partner: "+partner.Name)
 }
 
+func processFileActFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
+	//FileAct 데이터 생성
+	fadata, err := FileActDataMaker(filePath, partner, logCh)
+	if err != nil {
+		ferr := ErrorMessageRouter(filePath, partner)
+		if ferr != nil {
+			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
+		}
+		return fmt.Errorf("failed to create FileAct data: %w", err)
+	}
+
+	//send
+	response, err := FileActSender(fadata, filePath, tokenData, partner, settings, logCh, isPDE)
+	if err != nil {
+		ferr := ErrorMessageRouter(filePath, partner)
+		if ferr != nil {
+			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
+		}
+		return err
+	}
+
+	//완료
+	if isPDE {
+		logging.Easylog(logCh, "WARN", "FileAct message sent successfully with PDE. Response: "+response)
+	} else {
+		logging.Easylog(logCh, "INFO", "FileAct message sent successfully. Response: "+response)
+	}
+	err = os.Remove(fsutil.PathHelper(filePath))
+	if err != nil {
+		return fmt.Errorf("failed to remove file: %w", err)
+	}
+	return nil
+}
+
 func processMXFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
 	//MX 데이터 생성
 	mxdata, err := MXDataMaker(filePath, logCh)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", "Failed to create MX data: "+err.Error())
-		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-		err := os.Rename(fsutil.PathHelper(filePath), errorPath)
-		if err != nil {
-			logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+		ferr := ErrorMessageRouter(filePath, partner)
+		if ferr != nil {
+			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
 		}
-		return err
+		return fmt.Errorf("failed to create MX data: %w", err)
 	}
 
 	//send
 	response, err := MXSender(mxdata, tokenData, settings, logCh, isPDE)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", "Failed to send MX message: "+err.Error())
-		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-		err := os.Rename(fsutil.PathHelper(filePath), errorPath)
-		if err != nil {
-			logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+		ferr := ErrorMessageRouter(filePath, partner)
+		if ferr != nil {
+			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
 		}
-		return err
+		return fmt.Errorf("failed to send MX message: %w", err)
 	}
 
 	//완료
@@ -90,7 +134,7 @@ func processMXFile(settings *config.Settings, filePath string, partner *config.P
 	}
 	err = os.Remove(fsutil.PathHelper(filePath))
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", "Failed to remove file: "+err.Error())
+		return fmt.Errorf("failed to remove file: %w", err)
 	}
 	return nil
 }
@@ -99,25 +143,21 @@ func processMTFile(settings *config.Settings, filePath string, partner *config.P
 	//MT 데이터 생성
 	mtdata, err := MTDataMaker(filePath, logCh)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", "Failed to create MT data: "+err.Error())
-		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-		err := os.Rename(fsutil.PathHelper(filePath), errorPath)
-		if err != nil {
-			logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+		ferr := ErrorMessageRouter(filePath, partner)
+		if ferr != nil {
+			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
 		}
-		return err
+		return fmt.Errorf("failed to create MT data: %w", err)
 	}
 
 	//send
 	response, err := MTSender(mtdata, tokenData, settings, logCh, isPDE)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", "Failed to send MT message: "+err.Error())
-		errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-		err := os.Rename(fsutil.PathHelper(filePath), errorPath)
-		if err != nil {
-			logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
+		ferr := ErrorMessageRouter(filePath, partner)
+		if ferr != nil {
+			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
 		}
-		return err
+		return fmt.Errorf("failed to send MT message: %w", err)
 	}
 
 	//완료
@@ -128,7 +168,45 @@ func processMTFile(settings *config.Settings, filePath string, partner *config.P
 	}
 	err = os.Remove(fsutil.PathHelper(filePath))
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", "Failed to remove file: "+err.Error())
+		return fmt.Errorf("failed to remove file: %w", err)
 	}
+	return nil
+}
+func processDFAFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
+	//DFA 데이터 생성
+	fadata, err := DFADataMaker(filePath, partner, logCh)
+	if err != nil {
+		ferr := ErrorMessageRouter(filePath, partner)
+		if ferr != nil {
+			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
+		}
+		return fmt.Errorf("failed to create DFA data: %w", err)
+	}
+	//logging.Easylog(logCh, "INFO", fmt.Sprintf("fadata: %+v", fadata))
+
+	//send
+	response, err := FileActSender(fadata, filePath, tokenData, partner, settings, logCh, isPDE)
+	if err != nil {
+		ferr := ErrorMessageRouter(filePath, partner)
+		if ferr != nil {
+			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
+		}
+		return fmt.Errorf("failed to send FileAct message: %w", err)
+	}
+	//logging.Easylog(logCh, "INFO", fmt.Sprintf("fadata: %+v", fadata))
+
+	//다했으면 파일 지우기(Body)
+	err = os.Remove(fsutil.PathHelper(filePath))
+	if err != nil {
+		return fmt.Errorf("failed to delete file: %w", err)
+	}
+
+	//완료
+	if isPDE {
+		logging.Easylog(logCh, "WARN", "DFA file transfer completed successfully with PDE. Response: "+response)
+	} else {
+		logging.Easylog(logCh, "INFO", "DFA file transfer completed successfully. Response: "+response)
+	}
+
 	return nil
 }

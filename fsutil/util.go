@@ -45,20 +45,6 @@ func WaitFileReady(path string, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for file ready: %s", path)
 }
 
-func ErrorMessageRouter(prev string) error {
-	filePath := filepath.Dir(prev)
-	baseName := filepath.Base(prev)
-	if err := os.MkdirAll(filePath+"/error", 0755); err != nil {
-		return err
-	}
-
-	newPath := filePath + "/error/" + baseName
-	if err := os.Rename(prev, newPath); err != nil {
-		return err
-	}
-	return nil
-}
-
 func PathHelper(path string) string {
 	if path == "" {
 		return ""

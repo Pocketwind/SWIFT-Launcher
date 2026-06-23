@@ -53,8 +53,7 @@ func MultiAck(settings *config.Settings, tokenData *auth.TokenData, ids []string
 
 	resp, err := client.Do(req)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return err
+		return fmt.Errorf("error making request: %w", err)
 	}
 	defer resp.Body.Close()
 

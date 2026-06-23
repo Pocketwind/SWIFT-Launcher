@@ -62,6 +62,41 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 	var fileActMessages []string
 	var fileActReports []string
 
+	//input - ACK
+	//output - message
+	var finInputPartners []config.Partner
+	var finOutputPartners []config.Partner
+	var interActInputPartners []config.Partner
+	var interActOutputPartners []config.Partner
+	var fileActInputPartners []config.Partner
+	var fileActOutputPartners []config.Partner
+	//타입별로 분리
+	for _, partner := range partners {
+		switch partner.Type {
+		case "fin":
+			switch partner.Direction {
+			case "in":
+				finInputPartners = append(finInputPartners, partner)
+			case "out":
+				finOutputPartners = append(finOutputPartners, partner)
+			}
+		case "interAct":
+			switch partner.Direction {
+			case "in":
+				interActInputPartners = append(interActInputPartners, partner)
+			case "out":
+				interActOutputPartners = append(interActOutputPartners, partner)
+			}
+		case "fileAct":
+			switch partner.Direction {
+			case "in":
+				fileActInputPartners = append(fileActInputPartners, partner)
+			case "out":
+				fileActOutputPartners = append(fileActOutputPartners, partner)
+			}
+		}
+	}
+
 	for _, dist := range distributions {
 		switch dist.Service {
 		case "fin":
@@ -88,21 +123,6 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 		}
 	}
 
-	var finPartners []config.Partner
-	var interactPartners []config.Partner
-	var fileActPartners []config.Partner
-	//파트너별로 다운로드
-	for _, partner := range partners {
-		switch partner.Type {
-		case "fin":
-			finPartners = append(finPartners, partner)
-		case "interAct":
-			interactPartners = append(interactPartners, partner)
-		case "fileAct":
-			fileActPartners = append(fileActPartners, partner)
-		}
-	}
-
 	//고루틴 중복호출 문제
 	/*
 		go downloadFINMessages(settings, tokenData, finMessages, finPartners, logCh)
@@ -114,13 +134,15 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 	*/
 
 	var wg sync.WaitGroup
-	results := make(chan downloadResult, 4)
+	results := make(chan downloadResult, 6)
 
 	tasks := []task{
 		{mtype: finMsgTask, ids: finMessages},
 		{mtype: finReportTask, ids: finReports},
 		{mtype: interActMsgTask, ids: interactMessages},
 		{mtype: interActReportTask, ids: interactReports},
+		{mtype: fileActMsgTask, ids: fileActMessages},
+		{mtype: fileActReportTask, ids: fileActReports},
 	}
 
 	for _, t := range tasks {
@@ -136,13 +158,17 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 			var ackIDs []string
 			switch t.mtype {
 			case finMsgTask:
-				ackIDs, err = downloadFINMessages(settings, tokenData, finMessages, finPartners, logCh)
+				ackIDs, err = downloadFINMessages(settings, tokenData, finMessages, finOutputPartners, logCh)
 			case finReportTask:
-				ackIDs, err = downloadFINReports(settings, tokenData, finReports, finPartners, logCh)
+				ackIDs, err = downloadFINReports(settings, tokenData, finReports, finInputPartners, logCh)
 			case interActMsgTask:
-				ackIDs, err = downloadInterActMessages(settings, tokenData, interactMessages, interactPartners, logCh)
+				ackIDs, err = downloadInterActMessages(settings, tokenData, interactMessages, interActOutputPartners, logCh)
 			case interActReportTask:
-				ackIDs, err = downloadInterActReports(settings, tokenData, interactReports, interactPartners, logCh)
+				ackIDs, err = downloadInterActReports(settings, tokenData, interactReports, interActInputPartners, logCh)
+			case fileActMsgTask:
+				//ackIDs, err = downloadFileActMessages(settings, tokenData, fileActMessages, fileActOutputPartners, logCh)
+			case fileActReportTask:
+				ackIDs, err = downloadFileActReports(settings, tokenData, fileActReports, fileActInputPartners, logCh)
 			}
 
 			results <- downloadResult{ids: ackIDs, err: err}
@@ -170,7 +196,10 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 		ackIDs = append(ackIDs, id)
 	}
 	if len(ackIDs) > 0 {
-		MultiAck(settings, tokenData, ackIDs, logCh)
+		err := MultiAck(settings, tokenData, ackIDs, logCh)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 
 	return firstErr
@@ -194,8 +223,7 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 	//request 만들기
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
 	//param
 	query := req.URL.Query()
@@ -208,8 +236,7 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 	client := settings.Messaging.HttpClient
 	resp, err := client.Do(req)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error making request: %w", err)
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
@@ -226,8 +253,7 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 	var downloads []MXDownload
 	err = json.Unmarshal(response, &downloads)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error unmarshalling response for distribution %s: %v", ranges, err))
-		return nil, err
+		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
 	}
 	ackedSet := make(map[string]struct{})
 	//전문 생성 및 라우팅
@@ -294,8 +320,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 	//request 만들기
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
 	//param
 	query := req.URL.Query()
@@ -308,8 +333,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 	client := settings.Messaging.HttpClient
 	resp, err := client.Do(req)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error making request: %w", err)
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
@@ -326,8 +350,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 	var reports []MXReport
 	err = json.Unmarshal(response, &reports)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error unmarshalling response for distribution %s: %v", ranges, err))
-		return nil, err
+		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
 	}
 	ackedSet := make(map[string]struct{})
 	//전문 생성 및 라우팅
@@ -394,8 +417,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 	//request 만들기
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
 	//param
 	query := req.URL.Query()
@@ -408,8 +430,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 	client := settings.Messaging.HttpClient
 	resp, err := client.Do(req)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error making request: %w", err)
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
@@ -418,8 +439,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 		filePath := fsutil.PathHelper(settings.Messaging.DownloadPath) + "/" + ranges + ".json"
 		err = os.WriteFile(filePath, response, 0644)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %s: %v", ranges, err))
-			return err
+			return nil, fmt.Errorf("error writing file for distribution %s: %w", ranges, err)
 		}
 	*/
 
@@ -427,8 +447,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 	var reports []MTReport
 	err = json.Unmarshal(response, &reports)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error unmarshalling response for distribution %s: %v", ranges, err))
-		return nil, err
+		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
 	}
 	ackedSet := make(map[string]struct{})
 
@@ -497,8 +516,7 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 	//request 만들기
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
 	//param
 	query := req.URL.Query()
@@ -511,8 +529,7 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 	client := settings.Messaging.HttpClient
 	resp, err := client.Do(req)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error making request: %w", err)
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
@@ -521,8 +538,7 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 		filePath := fsutil.PathHelper(settings.Messaging.DownloadPath) + "/" + ranges + ".json"
 		err = os.WriteFile(filePath, response, 0644)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %s: %v", ranges, err))
-			return
+			return nil, fmt.Errorf("error writing file for distribution %s: %w", ranges, err)
 		}
 	*/
 
@@ -530,8 +546,7 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 	var downloads []MTDownload
 	err = json.Unmarshal(response, &downloads)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error unmarshalling response for distribution %s: %v", ranges, err))
-		return nil, err
+		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
 	}
 	ackedSet := make(map[string]struct{})
 
@@ -583,6 +598,103 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 	return ackedIDs, nil
 }
 
+func downloadFileActReports(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	//Auth
+	tokenData.RLock()
+	tokenType := tokenData.TokenType
+	accessToken := tokenData.AccessToken
+	tokenData.RUnlock()
+
+	//URL
+	downloadUrl := settings.Messaging.FileActReportUrl
+
+	//ids
+	idsJoined := strings.Join(ids, ",")
+	ranges := ids[0] + "-" + ids[len(ids)-1]
+
+	//request 만들기
+	req, err := http.NewRequest("GET", downloadUrl, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	//param
+	query := req.URL.Query()
+	query.Set("distribution-id", idsJoined)
+	req.URL.RawQuery = query.Encode()
+
+	//header
+	req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
+	req.Header.Set("Accept", "application/json")
+
+	//proxy 사용해서 call
+	client := settings.Messaging.HttpClient
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making request: %w", err)
+	}
+	defer resp.Body.Close()
+	response, _ := io.ReadAll(resp.Body)
+
+	//payload 분리
+	var reports []FileActReport
+	err = json.Unmarshal(response, &reports)
+	if err != nil {
+		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
+	}
+	ackedSet := make(map[string]struct{})
+
+	//전문 생성 및 라우팅
+	for _, report := range reports {
+		distID := strconv.Itoa(report.Distribution.ID)
+		routed := false
+		written := false
+		//파트너별로 라우팅
+		for _, partner := range partners {
+			if FileActRouter(partner, report.TransmissionReport.CompanionInfo) {
+				routed = true
+				ackPath := fsutil.PathHelper(partner.AckPath)
+				if tag := report.Distribution.DistributionTag; tag != "" {
+					ackPath = fsutil.PathHelper(ackPath + "/" + tag)
+				}
+				fsutil.EnsureDir(ackPath)
+				ackPath = fsutil.PathHelper(ackPath + "/" + strconv.Itoa(report.Distribution.ID) + partner.Extension)
+				reportFile, err := FileActReportMaker(report)
+				if err != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating FileAct report for distribution %d: %v", report.Distribution.ID, err))
+					continue
+				}
+				err = os.WriteFile(ackPath, []byte(reportFile), 0644)
+				if err != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
+					continue
+				}
+				written = true
+				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FileAct report for distribution %d to %s", report.Distribution.ID, ackPath))
+			}
+		}
+		if !routed {
+			logging.Easylog(logCh, "WARN", fmt.Sprintf("No route matched for FileAct report distribution %s. Skipping ACK.", distID))
+		} else if !written {
+			logging.Easylog(logCh, "WARN", fmt.Sprintf("FileAct report distribution %s matched route but file write failed. Skipping ACK.", distID))
+		}
+		if written {
+			ackedSet[distID] = struct{}{}
+		}
+	}
+	ackedIDs := make([]string, 0, len(ackedSet))
+	for id := range ackedSet {
+		ackedIDs = append(ackedIDs, id)
+	}
+	//ACK 처리
+	//MultiAck(settings, tokenData, ids, logCh)
+	return ackedIDs, nil
+}
+
 func GetDistributions(settings *config.Settings, tokenData *auth.TokenData, logCh chan<- logging.LogData) (*Distributions, error) {
 	//Auth
 	auth.Auth(settings, tokenData, logCh)
@@ -597,8 +709,7 @@ func GetDistributions(settings *config.Settings, tokenData *auth.TokenData, logC
 	//param
 	req, err := http.NewRequest("GET", distUrl, nil)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
 	query := req.URL.Query()
 	query.Set("limit", strconv.Itoa(settings.Messaging.MaxDistributionSize))
@@ -613,16 +724,14 @@ func GetDistributions(settings *config.Settings, tokenData *auth.TokenData, logC
 	client := settings.Messaging.HttpClient
 	resp, err := client.Do(req)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making request: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error making request: %w", err)
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
 	var distributions Distributions
 	err = json.Unmarshal(response, &distributions)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error unmarshalling response: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("error unmarshalling response: %w", err)
 	}
 	//data.Easylog(logCh, "INFO", fmt.Sprintln(string(response)))
 	return &distributions, nil

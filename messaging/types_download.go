@@ -30,10 +30,11 @@ type MXTransmissionReport struct { //transmission_report
 	ResponseDate    string `json:"response_date"`   //ACK처리시간 2026-04-06T02:13:53Z
 	DeliveryStatus  string `json:"delivery_status"` //Acked, Nacked
 	//RejectionCode   string    `json:"rejection_code"`
-	Responder   string            `json:"responder"`                   //DN
-	Report      string            `json:"transmission_report_payload"` //ACK 전문
-	Message     MXMessage         `json:"message"`                     //ACK에 원본 메시지 들어오는곳
-	NetworkInfo ReportNetworkInfo `json:"network_info"`
+	Responder     string            `json:"responder"`                   //DN
+	Report        string            `json:"transmission_report_payload"` //ACK 전문
+	Message       MXMessage         `json:"message"`                     //ACK에 원본 메시지 들어오는곳
+	NetworkInfo   ReportNetworkInfo `json:"network_info"`
+	CompanionInfo CompanionInfo     `json:"companion_info,omitempty"` //동일한 메시지에 대한 다른 네트워크의 보고서 정보 (예: MT 메시지에 대한 MX 보고서)
 }
 
 // MX 헤더
@@ -112,4 +113,8 @@ type MTTransmissionReport struct { //transmission_report
 type MTReport struct { //Report 다운로드한거
 	Distribution       Distribution         `json:"distribution"`
 	TransmissionReport MTTransmissionReport `json:"transmission_report"`
+}
+type FileActReport struct {
+	Distribution       Distribution         `json:"distribution"`
+	TransmissionReport MXTransmissionReport `json:"transmission_report"`
 }
