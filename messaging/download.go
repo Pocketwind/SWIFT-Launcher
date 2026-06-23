@@ -1,6 +1,8 @@
 package messaging
 
 import (
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -166,7 +168,7 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 			case interActReportTask:
 				ackIDs, err = downloadInterActReports(settings, tokenData, interactReports, interActInputPartners, logCh)
 			case fileActMsgTask:
-				//ackIDs, err = downloadFileActMessages(settings, tokenData, fileActMessages, fileActOutputPartners, logCh)
+				ackIDs, err = downloadFileActMessages(settings, tokenData, fileActMessages, fileActOutputPartners, logCh)
 			case fileActReportTask:
 				ackIDs, err = downloadFileActReports(settings, tokenData, fileActReports, fileActInputPartners, logCh)
 			}
@@ -735,4 +737,173 @@ func GetDistributions(settings *config.Settings, tokenData *auth.TokenData, logC
 	}
 	//data.Easylog(logCh, "INFO", fmt.Sprintln(string(response)))
 	return &distributions, nil
+}
+
+func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	//auth
+	tokenData.RLock()
+	tokenType := tokenData.TokenType
+	accessToken := tokenData.AccessToken
+	tokenData.RUnlock()
+
+	//URL
+	downloadUrl := settings.Messaging.FileActMessageUrl
+
+	//request body
+	//encryption key 임의 설정 32글자
+	encKey := "01234567890123456789012345678901"
+	encKeyB64 := base64.StdEncoding.EncodeToString([]byte(encKey))
+	encKeyMD5 := md5.Sum([]byte(encKey))
+	fileTransferRequest := FileTransferRequest{
+		FileAttributes: FileAttributes{
+			FileName: "temp.bin",
+		},
+		FileOperation: FileOperation{
+			Type: "download",
+		},
+		EncryptionAttributes: EncryptionAttributes{
+			KeyAlg:       "AES256",
+			KeyValue:     encKeyB64,
+			KeyDigestAlg: "MD5",
+			KeyDigest:    base64.StdEncoding.EncodeToString(encKeyMD5[:]),
+		},
+	}
+
+	//json body
+	bodyBytes, err := json.Marshal(fileTransferRequest)
+	if err != nil {
+		return nil, fmt.Errorf("error marshalling request body: %w", err)
+	}
+	ackedSet := make(map[string]struct{})
+
+	//FileAct는 한번에 하나만 다운가능
+	//Initiate
+	for _, id := range ids {
+		routed := false
+		written := false
+		//request 만들기
+		req, err := http.NewRequest("POST", downloadUrl, strings.NewReader(string(bodyBytes)))
+		if err != nil {
+			return nil, fmt.Errorf("error creating request: %w", err)
+		}
+
+		//param
+		query := req.URL.Query()
+		query.Set("distribution-id", id)
+		req.URL.RawQuery = query.Encode()
+
+		//header
+		req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
+		req.Header.Set("Accept", "application/json")
+
+		//proxy 사용해서 call
+		client := settings.Messaging.HttpClient
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("error making request: %w", err)
+		}
+		response, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("error reading response body: %w", err)
+		}
+		var fileActResponse Distribution
+		err = json.Unmarshal(response, &fileActResponse)
+		if err != nil {
+			return nil, fmt.Errorf("error unmarshalling response: %w", err)
+		}
+		if len(fileActResponse.FileTransferResponse.SignedURLs) == 0 {
+			logging.Easylog(logCh, "WARN", fmt.Sprintf("No signed URL for FileAct message distribution %s. Skipping ACK.", id))
+			continue
+		}
+		//data.Easylog(logCh, "INFO", fmt.Sprintln(string(response)))
+
+		//--------------------------------------------------------------------------------------
+
+		//Download
+		signedURL := fileActResponse.FileTransferResponse.SignedURLs[0].URL
+
+		//파트너 라우팅
+		for _, partner := range partners {
+			if FileActRouter(partner, fileActResponse.CompanionInfo) {
+				routed = true
+				outputPath := fsutil.PathHelper(partner.OutputPath)
+				if tag := fileActResponse.DistributionTag; tag != "" {
+					outputPath = fsutil.PathHelper(outputPath + "/" + tag)
+				}
+				err = fsutil.EnsureDir(outputPath)
+				if err != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error ensuring output dir for distribution %s: %v", id, err))
+					continue
+				}
+				outputPath = fsutil.PathHelper(outputPath + "/" + fileActResponse.CompanionInfo.SenderReference + partner.Extension)
+
+				//Download file
+				req, err := http.NewRequest("GET", signedURL, nil)
+				if err != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating download request for distribution %s: %v", id, err))
+					continue
+				}
+				req.Header.Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+				req.Header.Set("x-amz-server-side-encryption-customer-key", encKeyB64)
+				req.Header.Set("x-amz-server-side-encryption-customer-key-MD5", base64.StdEncoding.EncodeToString(encKeyMD5[:]))
+
+				client := settings.Messaging.HttpClient
+				resp, err := client.Do(req)
+				if err != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making download request for distribution %s: %v", id, err))
+					continue
+				}
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					resp.Body.Close()
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Download request failed for distribution %s with status %s", id, resp.Status))
+					continue
+				}
+
+				//Write to file
+				outFile, err := os.Create(outputPath)
+				if err != nil {
+					resp.Body.Close()
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating output file for distribution %s: %v", id, err))
+					continue
+				}
+
+				_, err = io.Copy(outFile, resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					outFile.Close()
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing output file for distribution %s: %v", id, err))
+					continue
+				}
+				err = outFile.Close()
+				if err != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error closing output file for distribution %s: %v", id, err))
+					continue
+				}
+
+				written = true
+				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FileAct message for distribution %s to %s", fileActResponse.CompanionInfo.SenderReference, outputPath))
+			}
+		}
+
+		if !routed {
+			logging.Easylog(logCh, "WARN", fmt.Sprintf("No route matched for FileAct message distribution %s. Skipping ACK.", id))
+		} else if !written {
+			logging.Easylog(logCh, "WARN", fmt.Sprintf("FileAct message distribution %s matched route but file write failed. Skipping ACK.", id))
+		}
+		if written {
+			ackedSet[id] = struct{}{}
+		}
+	}
+
+	ackedIDs := make([]string, 0, len(ackedSet))
+	for id := range ackedSet {
+		ackedIDs = append(ackedIDs, id)
+	}
+
+	return ackedIDs, nil
 }

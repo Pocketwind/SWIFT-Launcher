@@ -32,6 +32,7 @@ type Messaging struct {
 	InterActMessageUrl  string `json:"interActMessageUrl"`
 	AckUrl              string `json:"ackUrl"`
 	FileActUrl          string `json:"fileActUrl"`
+	FileActMessageUrl   string `json:"fileActMessageUrl"`
 	FileActAckUrl       string `json:"fileActAckUrl"`
 	FileActReportUrl    string `json:"fileActReportUrl"`
 	Proxy               string `json:"proxy"`
