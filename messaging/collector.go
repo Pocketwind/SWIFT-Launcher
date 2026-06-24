@@ -35,7 +35,7 @@ loop:
 			isPDE := fsutil.IsPathUnderDir(filePath, partner.ProgressPath)
 			//in_progress로 이동
 			progressPath := fsutil.PathHelper(partner.ProgressPath + "/" + fsutil.GetFileName(filePath))
-			err := os.Rename(fsutil.PathHelper(filePath), progressPath)
+			err := os.Rename(fsutil.PathHelper(filePath), fsutil.PathHelper(progressPath))
 			if err != nil {
 				logging.Easylog(logCh, "ERROR", "Failed to move file to progress directory: "+err.Error())
 				continue
