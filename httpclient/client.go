@@ -12,7 +12,7 @@ import (
 	"github.com/Pocketwind/SWIFT-Launcher/config"
 )
 
-func MakeHTTPClient(settings *config.Settings) *http.Client {
+func MakeHTTPClient(settings *config.Settings) (*http.Client, error) {
 	//기본 30초
 	timeout := 30 * time.Second
 	if settings.Messaging.RequestTimeout > 0 {
@@ -37,13 +37,13 @@ func MakeHTTPClient(settings *config.Settings) *http.Client {
 
 	//프록시 없으면(url == "")
 	if settings.Messaging.Proxy == "" {
-		return &http.Client{Timeout: timeout, Transport: transport}
+		return &http.Client{Timeout: timeout, Transport: transport}, nil
 	}
 
 	//프록시 있으면
 	proxyURL, err := url.Parse(settings.Messaging.Proxy)
 	if err != nil {
-		return &http.Client{Timeout: timeout, Transport: transport}
+		return nil, err
 	}
 
 	transport.Proxy = http.ProxyURL(proxyURL)
@@ -51,5 +51,5 @@ func MakeHTTPClient(settings *config.Settings) *http.Client {
 		Timeout:   timeout,
 		Transport: transport,
 	}
-	return client
+	return client, nil
 }

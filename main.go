@@ -122,7 +122,13 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 	logging.Easylog(logCh, "INFO", "Settings loaded successfully")
 
 	//HTTP 클라이언트 생성
-	settings.Messaging.HttpClient = httpclient.MakeHTTPClient(settings)
+	settings.Messaging.HttpClient, err = httpclient.MakeHTTPClient(settings)
+	if err != nil {
+		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to create HTTP client: %v", err))
+		fmt.Printf("ERROR: Failed to create HTTP client: %v\n", err)
+		shutdownEarly("Startup aborted: failed to create HTTP client")
+		return
+	}
 
 	//파트너 파일 로드
 	partners, err := config.LoadPartners(settings.Messaging.PartnerFilePath)
