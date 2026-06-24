@@ -276,15 +276,16 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 				messageFile, err := MXMessageMaker(message)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating MX message for distribution %d: %v", message.Distribution.ID, err))
-					continue
+					break
 				}
 				err = os.WriteFile(outputPath, []byte(messageFile), 0644)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", message.Distribution.ID, err))
-					continue
+					break
 				}
 				written = true
 				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded MX message for distribution %d to %s", message.Distribution.ID, outputPath))
+				break
 			}
 		}
 		if !routed {
@@ -373,15 +374,16 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 				reportFile, err := MXReportMaker(report)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating MX report for distribution %d: %v", report.Distribution.ID, err))
-					continue
+					break
 				}
 				err = os.WriteFile(ackPath, []byte(reportFile), 0644)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
-					continue
+					break
 				}
 				written = true
 				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded MX report for distribution %d to %s", report.Distribution.ID, ackPath))
+				break
 			}
 		}
 		if !routed {
@@ -471,15 +473,16 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 				reportFile, err := FINReportMaker(report)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating FIN report for distribution %d: %v", report.Distribution.ID, err))
-					continue
+					break
 				}
 				err = os.WriteFile(ackPath, []byte(reportFile), 0644)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
-					continue
+					break
 				}
 				written = true
 				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FIN report for distribution %d to %s", report.Distribution.ID, ackPath))
+				break
 			}
 		}
 		if !routed {
@@ -570,15 +573,16 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 				messageFile, err := FINMessageMaker(message)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating FIN message for distribution %d: %v", message.Distribution.ID, err))
-					continue
+					break
 				}
 				err = os.WriteFile(outputPath, []byte(messageFile), 0644)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", message.Distribution.ID, err))
-					continue
+					break
 				}
 				written = true
 				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FIN message for distribution %d to %s", message.Distribution.ID, outputPath))
+				break
 			}
 		}
 		if !routed {
@@ -668,15 +672,16 @@ func downloadFileActReports(settings *config.Settings, tokenData *auth.TokenData
 				reportFile, err := FileActReportMaker(report)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating FileAct report for distribution %d: %v", report.Distribution.ID, err))
-					continue
+					break
 				}
 				err = os.WriteFile(ackPath, []byte(reportFile), 0644)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
-					continue
+					break
 				}
 				written = true
 				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FileAct report for distribution %d to %s", report.Distribution.ID, ackPath))
+				break
 			}
 		}
 		if !routed {
@@ -838,7 +843,7 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 				err = fsutil.EnsureDir(outputPath)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error ensuring output dir for distribution %s: %v", id, err))
-					continue
+					break
 				}
 				outputPath = fsutil.PathHelper(outputPath + "/" + fileActResponse.CompanionInfo.SenderReference + partner.Extension)
 
@@ -846,7 +851,7 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 				req, err := http.NewRequest("GET", signedURL, nil)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating download request for distribution %s: %v", id, err))
-					continue
+					break
 				}
 				req.Header.Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
 				req.Header.Set("x-amz-server-side-encryption-customer-key", encKeyB64)
@@ -856,12 +861,12 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 				resp, err := client.Do(req)
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making download request for distribution %s: %v", id, err))
-					continue
+					break
 				}
 				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 					resp.Body.Close()
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Download request failed for distribution %s with status %s", id, resp.Status))
-					continue
+					break
 				}
 
 				//Write to file
@@ -869,7 +874,7 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 				if err != nil {
 					resp.Body.Close()
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating output file for distribution %s: %v", id, err))
-					continue
+					break
 				}
 
 				_, err = io.Copy(outFile, resp.Body)
@@ -877,16 +882,17 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 				if err != nil {
 					outFile.Close()
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing output file for distribution %s: %v", id, err))
-					continue
+					break
 				}
 				err = outFile.Close()
 				if err != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error closing output file for distribution %s: %v", id, err))
-					continue
+					break
 				}
 
 				written = true
 				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FileAct message for distribution %s to %s", fileActResponse.CompanionInfo.SenderReference, outputPath))
+				break
 			}
 		}
 
