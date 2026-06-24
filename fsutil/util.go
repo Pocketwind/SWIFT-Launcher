@@ -49,7 +49,42 @@ func PathHelper(path string) string {
 	if path == "" {
 		return ""
 	}
-	return strings.ReplaceAll(path, "\\", "/")
+
+	cleaned := strings.ReplaceAll(path, "\\", "/")
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return ""
+	}
+
+	if cleaned == "." {
+		return "."
+	}
+
+	parts := strings.Split(cleaned, "/")
+	stack := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		default:
+			stack = append(stack, part)
+		}
+	}
+
+	if len(stack) == 0 {
+		return "."
+	}
+
+	result := strings.Join(stack, "/")
+	if strings.HasPrefix(path, "/") {
+		return "/" + result
+	}
+	return result
 }
 
 func GetFileName(path string) string {
