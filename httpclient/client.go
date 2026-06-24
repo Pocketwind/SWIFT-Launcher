@@ -3,6 +3,8 @@ package httpclient
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,6 +13,33 @@ import (
 
 	"github.com/Pocketwind/SWIFT-Launcher/config"
 )
+
+func appendCertsFromFile(pool *x509.CertPool, filePath string) error {
+	certData, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	if ok := pool.AppendCertsFromPEM(certData); ok {
+		return nil
+	}
+
+	if block, _ := pem.Decode(certData); block != nil {
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return err
+		}
+		pool.AddCert(cert)
+		return nil
+	}
+
+	cert, err := x509.ParseCertificate(certData)
+	if err != nil {
+		return err
+	}
+	pool.AddCert(cert)
+	return nil
+}
 
 func MakeHTTPClient(settings *config.Settings) (*http.Client, error) {
 	//기본 30초
@@ -26,10 +55,13 @@ func MakeHTTPClient(settings *config.Settings) (*http.Client, error) {
 	}
 
 	if caCertPath := strings.TrimSpace(settings.CACertPath); caCertPath != "" {
-		if caPEM, err := os.ReadFile(caCertPath); err == nil {
-			rootCAs.AppendCertsFromPEM(caPEM)
+		if err := appendCertsFromFile(rootCAs, caCertPath); err != nil {
+			fmt.Printf("WARN: failed to load custom CA cert from %s: %v\n", caCertPath, err)
 		}
 	}
+
+	fmt.Printf("HTTP Client created with timeout: %s and CA certs from: %s\n", timeout, settings.CACertPath)
+	fmt.Printf("Loaded %d CA certificates into trust pool\n", len(rootCAs.Subjects()))
 
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{RootCAs: rootCAs},
