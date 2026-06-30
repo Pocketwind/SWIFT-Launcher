@@ -2,13 +2,17 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/Pocketwind/SWIFT-Launcher/auth"
 	"github.com/Pocketwind/SWIFT-Launcher/config"
@@ -45,16 +49,54 @@ func main() {
 			fmt.Printf("Service %s succeeded\n", cmd)
 			return
 		case "status":
-			status := "unknown"
+			svcStatus := "unknown"
 			currentSt, err := s.Status()
 			if err == nil {
 				if currentSt == service.StatusRunning {
-					status = "running"
+					svcStatus = "running"
 				} else if currentSt == service.StatusStopped {
-					status = "stopped"
+					svcStatus = "stopped"
 				}
 			}
-			fmt.Printf("Service status: %s\n", status)
+			fmt.Printf("Service status: %s\n", svcStatus)
+
+			// 런타임 상태 조회
+			cfg, cfgErr := config.LoadSettings("settings.json")
+			if cfgErr != nil || cfg.Status.Port <= 0 {
+				return
+			}
+			hc := &http.Client{Timeout: 2 * time.Second}
+			rtResp, rtErr := hc.Get(fmt.Sprintf("http://127.0.0.1:%d/status", cfg.Status.Port))
+			if rtErr != nil {
+				fmt.Println("Runtime status: unavailable")
+				return
+			}
+			defer rtResp.Body.Close()
+			var rt map[string]any
+			if jsonErr := json.NewDecoder(rtResp.Body).Decode(&rt); jsonErr != nil {
+				fmt.Println("Runtime status: parse error")
+				return
+			}
+			fmt.Println("---------- Runtime Status ----------")
+			if uptime, ok := rt["uptime_seconds"]; ok {
+				fmt.Printf("Uptime       : %.0f seconds\n", uptime)
+			}
+			if token, ok := rt["access_token"].(string); ok {
+				if token == "" {
+					fmt.Println("Access Token : (not obtained)")
+				} else {
+					fmt.Printf("Access Token : %s\n", token)
+				}
+			}
+			if ps, ok := rt["partners"].([]any); ok {
+				fmt.Printf("Partners     : %d\n", len(ps))
+				for _, p := range ps {
+					if pm, ok := p.(map[string]any); ok {
+						fmt.Printf("  - %-15s [%s] (%s) [%s]\n", pm["name"], pm["direction"], pm["type"], pm["status"])
+					}
+				}
+			}
+			fmt.Println("------------------------------------")
 			return
 		case "console":
 			app(true, nil)
@@ -80,6 +122,7 @@ func main() {
 }
 
 func app(interactive bool, serviceStop <-chan struct{}) {
+	startTime := time.Now()
 	if exePath, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exePath)
 		if chdirErr := os.Chdir(exeDir); chdirErr != nil {
@@ -240,24 +283,28 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure input directory: %v", err))
 			fmt.Printf("ERROR: Failed to ensure input directory: %v\n", err)
+			shutdownEarly("Startup aborted: failed to ensure input directory")
 			return
 		}
 		err = fsutil.EnsureDir(fsutil.PathHelper(inputPartners[i].AckPath))
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure ack directory: %v", err))
 			fmt.Printf("ERROR: Failed to ensure ack directory: %v\n", err)
+			shutdownEarly("Startup aborted: failed to ensure ack directory")
 			return
 		}
 		err = fsutil.EnsureDir(fsutil.PathHelper(inputPartners[i].ErrorPath))
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure error directory: %v", err))
 			fmt.Printf("ERROR: Failed to ensure error directory: %v\n", err)
+			shutdownEarly("Startup aborted: failed to ensure error directory")
 			return
 		}
 		err = fsutil.EnsureDir(fsutil.PathHelper(inputPartners[i].ProgressPath))
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure progress directory: %v", err))
 			fmt.Printf("ERROR: Failed to ensure progress directory: %v\n", err)
+			shutdownEarly("Startup aborted: failed to ensure progress directory")
 			return
 		}
 	}
@@ -276,13 +323,15 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 	//Worker 등록 및 shutdown 함수 생성
 	startTokenService(&wg, settings, tokenData, logCh, exitCmd)
 	shutdown := createShutdown(stopAll, &wg, &shutdownOnce, tokenData, settings, logCh, doneLogger)
-	for i := range partners {
+	//Status 서비스 시작
+	startStatusService(&wg, settings, tokenData, partners, logCh, exitCmd, startTime)
+	for i := range inputPartners {
 		//파트너 파일 watcher 시작
 		wg.Add(1)
 		go func(partner *config.Partner) {
 			defer wg.Done()
 			fsutil.WatchFileService(partner, exitCmd, logCh)
-		}(&partners[i])
+		}(&inputPartners[i])
 	}
 	//Collector 서비스 시작 (Input)
 	for i := range inputPartners {
@@ -407,6 +456,72 @@ func (p *program) Stop(s service.Service) error {
 	})
 	<-p.doneChan
 	return nil
+}
+
+func startStatusService(wg *sync.WaitGroup, settings *config.Settings, tokenData *auth.TokenData, partners []config.Partner, logCh chan logging.LogData, exitCmd <-chan bool, startTime time.Time) {
+	if settings.Status.Port <= 0 {
+		logging.Easylog(logCh, "INFO", "Status service disabled (port not configured)")
+		return
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", settings.Status.Port)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		tokenData.RLock()
+		accessToken := tokenData.AccessToken
+		tokenData.RUnlock()
+
+		partnerList := make([]map[string]string, 0, len(partners))
+		for _, p := range partners {
+			partnerList = append(partnerList, map[string]string{
+				"name":      p.Name,
+				"direction": p.Direction,
+				"type":      p.Type,
+				"status":    fmt.Sprintf("%v", p.Status),
+			})
+		}
+
+		resp := map[string]any{
+			"uptime_seconds": int64(time.Since(startTime).Seconds()),
+			"access_token":   accessToken,
+			"partners":       partnerList,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		IdleTimeout:  30 * time.Second,
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logging.Easylog(logCh, "INFO", fmt.Sprintf("Status service listening on %s", addr))
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Status service error: %v", err))
+		}
+		logging.Easylog(logCh, "INFO", "Status service stopped")
+	}()
+
+	// exitCmd 감지 시 graceful shutdown
+	go func() {
+		<-exitCmd
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}()
 }
 
 func showHelp() {

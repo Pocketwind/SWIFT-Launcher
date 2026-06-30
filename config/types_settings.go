@@ -13,6 +13,13 @@ type Settings struct {
 	CACertPath   string `json:"cacertPath"`
 	//messaging 설정
 	Messaging Messaging `json:"messaging"`
+	//status 설정
+	Status Status `json:"status"`
+}
+
+// Status 서비스 설정 (localhost 전용)
+type Status struct {
+	Port int `json:"port"` // 0이면 비활성화
 }
 type Messaging struct {
 	ConsumerKey         string `json:"consumerKey"`
@@ -49,6 +56,7 @@ type Messaging struct {
 type Partner struct {
 	Name         string `json:"name"`
 	Description  string `json:"description"`
+	Status       bool   `json:"status"`    //true면 켜진거
 	Direction    string `json:"direction"` //in, out
 	Type         string `json:"type"`
 	InputPath    string `json:"input_path"`

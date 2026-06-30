@@ -74,6 +74,11 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 	var fileActOutputPartners []config.Partner
 	//타입별로 분리
 	for _, partner := range partners {
+		//파트너 status false면 끄기
+		if !partner.Status {
+			logging.Easylog(logCh, "INFO", "Partner is disabled: "+partner.Name)
+			continue
+		}
 		switch partner.Type {
 		case "fin":
 			switch partner.Direction {

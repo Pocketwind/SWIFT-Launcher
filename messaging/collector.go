@@ -11,6 +11,12 @@ import (
 )
 
 func CollectorService(settings *config.Settings, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, exitCmd <-chan bool) {
+	//partner status false면 끄기
+	if !partner.Status {
+		logging.Easylog(logCh, "INFO", "Collector is disabled for partner: "+partner.Name)
+		return
+	}
+
 	logging.Easylog(logCh, "INFO", "Starting Collector for partner: "+partner.Name)
 
 loop:
