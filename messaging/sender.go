@@ -43,21 +43,21 @@ func MTSender(mdata MTData, token *auth.TokenData, settings *config.Settings, lo
 		bodyBytes, err := json.Marshal(bodyMap)
 	*/
 	if err != nil {
-		return fmt.Sprintf("Error marshaling request body: %v", err), err
+		return "", fmt.Errorf("error marshaling request body: %w", err)
 	}
 	bodyString := string(bodyBytes)
 
 	//NRSignature 만들기
 	signature, err := auth.NRSignatureMaker(settings.Messaging.FinMessageUrl, settings.Messaging.Subject, bodyString, privateKey, publicKey)
 	if err != nil {
-		return fmt.Sprintf("Error creating NRSignature: %v", err), err
+		return "", fmt.Errorf("error creating NRSignature: %w", err)
 	}
 
 	//request 만들기
 	finurl := settings.Messaging.FinMessageUrl
 	req, err := http.NewRequest("POST", finurl, strings.NewReader(bodyString))
 	if err != nil {
-		return fmt.Sprintf("Error creating request: %v", err), err
+		return "", fmt.Errorf("error creating request: %w", err)
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
 	req.Header.Set("X-SWIFT-Signature", signature)
@@ -68,7 +68,7 @@ func MTSender(mdata MTData, token *auth.TokenData, settings *config.Settings, lo
 	client := settings.Messaging.HttpClient
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Sprintf("Error making request: %v", err), err
+		return "", fmt.Errorf("error making request: %w", err)
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
@@ -76,11 +76,11 @@ func MTSender(mdata MTData, token *auth.TokenData, settings *config.Settings, lo
 	var messageResponse MessageResponse
 	err = json.Unmarshal(response, &messageResponse)
 	if err != nil {
-		return fmt.Sprintf("Error parsing response: %v", err), err
+		return "", fmt.Errorf("error parsing response: %w", err)
 	}
 
 	if messageResponse.MessageCloudReference == "" {
-		return "message_cloud_reference not found in response", fmt.Errorf("message_cloud_reference not found in response")
+		return "", fmt.Errorf("message_cloud_reference not found in response")
 	}
 
 	return messageResponse.MessageCloudReference, nil
@@ -151,7 +151,7 @@ func MXSender(mdata MXData, token *auth.TokenData, settings *config.Settings, lo
 	}
 
 	if messageResponse.MessageCloudReference == "" {
-		return "message_cloud_reference not found in response", fmt.Errorf("message_cloud_reference not found in response")
+		return "", fmt.Errorf("message_cloud_reference not found in response")
 	}
 
 	return messageResponse.MessageCloudReference, nil
