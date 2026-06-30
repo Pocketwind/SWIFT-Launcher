@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -56,6 +57,15 @@ func MultiAck(settings *config.Settings, tokenData *auth.TokenData, ids []string
 		return fmt.Errorf("error making request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	//200이 OK, 나머지는 에러
+	if resp.StatusCode != 200 {
+		errorBody, _ := io.ReadAll(resp.Body)
+		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ack messages. Status: %d, Response: %s", resp.StatusCode, string(errorBody)))
+		return fmt.Errorf("failed to ack messages. Status: %d, Response: %s", resp.StatusCode, string(errorBody))
+	} else {
+		logging.Easylog(logCh, "INFO", fmt.Sprintf("Acked %d messages", len(ids)))
+	}
 
 	return nil
 }
