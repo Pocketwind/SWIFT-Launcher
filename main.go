@@ -534,4 +534,5 @@ func showHelp() {
 	fmt.Println("status    - Show service status")
 	fmt.Println("console   - Run in console mode")
 	fmt.Println("help      - Show this help")
+	fmt.Println("status    - Show partners and runtime status")
 }
