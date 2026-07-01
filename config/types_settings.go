@@ -86,3 +86,19 @@ type DFAInfo struct {
 	Requestor           string `json:"requestor,omitempty"`
 	Responder           string `json:"responder,omitempty"`
 }
+
+type StatusData struct {
+	Name         string  `json:"name"`
+	Direction    string  `json:"direction"`
+	Status       bool    `json:"status"`
+	Type         string  `json:"type"`
+	InputPath    string  `json:"input_path,omitempty"`
+	OutputPath   string  `json:"output_path,omitempty"`
+	AckPath      string  `json:"ack_path,omitempty"`
+	ErrorPath    string  `json:"error_path,omitempty"`
+	ProgressPath string  `json:"progress_path,omitempty"`
+	Extension    string  `json:"extension,omitempty"`
+	IsDFA        bool    `json:"is_dfa,omitempty"`
+	DFAInfo      DFAInfo `json:"network_info,omitempty"`
+	Route        Route   `json:"route,omitempty"`
+}

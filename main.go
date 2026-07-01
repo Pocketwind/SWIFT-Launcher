@@ -49,6 +49,12 @@ func main() {
 			fmt.Printf("Service %s succeeded\n", cmd)
 			return
 		case "status":
+			type runtimeStatus struct {
+				UptimeSeconds int64               `json:"uptime_seconds"`
+				AccessToken   string              `json:"access_token"`
+				Partners      []config.StatusData `json:"partners"`
+			}
+
 			svcStatus := "unknown"
 			currentSt, err := s.Status()
 			if err == nil {
@@ -72,29 +78,21 @@ func main() {
 				return
 			}
 			defer rtResp.Body.Close()
-			var rt map[string]any
+			var rt runtimeStatus
 			if jsonErr := json.NewDecoder(rtResp.Body).Decode(&rt); jsonErr != nil {
 				fmt.Println("Runtime status: parse error")
 				return
 			}
 			fmt.Println("---------- Runtime Status ----------")
-			if uptime, ok := rt["uptime_seconds"]; ok {
-				fmt.Printf("Uptime       : %.0f seconds\n", uptime)
+			fmt.Printf("Uptime       : %d seconds\n", rt.UptimeSeconds)
+			if rt.AccessToken == "" {
+				fmt.Println("Access Token : (not obtained)")
+			} else {
+				fmt.Printf("Access Token : %s\n", rt.AccessToken)
 			}
-			if token, ok := rt["access_token"].(string); ok {
-				if token == "" {
-					fmt.Println("Access Token : (not obtained)")
-				} else {
-					fmt.Printf("Access Token : %s\n", token)
-				}
-			}
-			if ps, ok := rt["partners"].([]any); ok {
-				fmt.Printf("Partners     : %d\n", len(ps))
-				for _, p := range ps {
-					if pm, ok := p.(map[string]any); ok {
-						fmt.Printf("  - %-15s [%s] (%s) [%s]\n", pm["name"], pm["direction"], pm["type"], pm["status"])
-					}
-				}
+			fmt.Printf("Partners     : %d\n", len(rt.Partners))
+			for _, partner := range rt.Partners {
+				fmt.Printf("  - %s (%s) : %t - %s\n", partner.Name, partner.Direction, partner.Status, partner.Route)
 			}
 			fmt.Println("------------------------------------")
 			return
@@ -477,13 +475,22 @@ func startStatusService(wg *sync.WaitGroup, settings *config.Settings, tokenData
 		accessToken := tokenData.AccessToken
 		tokenData.RUnlock()
 
-		partnerList := make([]map[string]string, 0, len(partners))
+		partnerList := make([]config.StatusData, 0, len(partners))
 		for _, p := range partners {
-			partnerList = append(partnerList, map[string]string{
-				"name":      p.Name,
-				"direction": p.Direction,
-				"type":      p.Type,
-				"status":    fmt.Sprintf("%v", p.Status),
+			partnerList = append(partnerList, config.StatusData{
+				Name:         p.Name,
+				Direction:    p.Direction,
+				Status:       p.Status,
+				Type:         p.Type,
+				InputPath:    p.InputPath,
+				OutputPath:   p.OutputPath,
+				AckPath:      p.AckPath,
+				ErrorPath:    p.ErrorPath,
+				ProgressPath: p.ProgressPath,
+				Extension:    p.Extension,
+				IsDFA:        p.IsDFA,
+				DFAInfo:      p.DFAInfo,
+				Route:        p.Route,
 			})
 		}
 
