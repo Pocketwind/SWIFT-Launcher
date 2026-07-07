@@ -97,6 +97,7 @@ type MTMessage struct {
 	Receiver        string      `json:"receiver"`     //BIC
 	NetworkInfo     NetworkInfo `json:"network_info"`
 	Payload         string      `json:"payload"`   //block4 내용
+	MT              MT          `json:"mt"`        //MT 구조
 	Direction       string      `json:"direction"` //Incoming, Outgoing
 }
 type MTTransmissionReport struct { //transmission_report

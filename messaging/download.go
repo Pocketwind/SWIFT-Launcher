@@ -289,7 +289,7 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 					break
 				}
 				written = true
-				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded MX message for distribution %d to %s", message.Distribution.ID, outputPath))
+				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded MX message for distribution %d to %s (%s)", message.Distribution.ID, outputPath, partner.Name))
 				break
 			}
 		}
@@ -387,7 +387,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 					break
 				}
 				written = true
-				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded MX report for distribution %d to %s", report.Distribution.ID, ackPath))
+				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded MX report for distribution %d to %s (%s)", report.Distribution.ID, ackPath, partner.Name))
 				break
 			}
 		}
@@ -486,7 +486,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 					break
 				}
 				written = true
-				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FIN report for distribution %d to %s", report.Distribution.ID, ackPath))
+				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FIN report for distribution %d to %s (%s)", report.Distribution.ID, ackPath, partner.Name))
 				break
 			}
 		}
@@ -565,6 +565,14 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 		distID := strconv.Itoa(message.Distribution.ID)
 		routed := false
 		written := false
+		//전문 구조화
+		mt, err := MTParser(message.Message.Payload)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MT message for distribution %d: %v", message.Distribution.ID, err))
+			continue
+		}
+		message.Message.MT = mt
+		logging.Easylog(logCh, "INFO", fmt.Sprintf("%v", mt))
 		//파트너별로 라우팅
 		for _, partner := range partners {
 			if MTRouter(partner.Route, message.Message) { //라우팅 기능 임시 off 무조건 true
@@ -586,7 +594,7 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 					break
 				}
 				written = true
-				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FIN message for distribution %d to %s", message.Distribution.ID, outputPath))
+				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FIN message for distribution %d to %s (%s)", message.Distribution.ID, outputPath, partner.Name))
 				break
 			}
 		}
@@ -685,7 +693,7 @@ func downloadFileActReports(settings *config.Settings, tokenData *auth.TokenData
 					break
 				}
 				written = true
-				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FileAct report for distribution %d to %s", report.Distribution.ID, ackPath))
+				logging.Easylog(logCh, "INFO", fmt.Sprintf("Downloaded FileAct report for distribution %d to %s (%s)", report.Distribution.ID, ackPath, partner.Name))
 				break
 			}
 		}
