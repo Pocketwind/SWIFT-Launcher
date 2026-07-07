@@ -417,10 +417,23 @@ func createShutdown(stopAll func(string), wg *sync.WaitGroup, shutdownOnce *sync
 	return func(reason string) {
 		shutdownOnce.Do(func() {
 			stopAll(reason)
-			wg.Wait()
-			auth.RevokeToken(settings, tokenData, logCh)
-			close(logCh)
-			<-doneLogger
+
+			waitDone := make(chan struct{})
+			go func() {
+				wg.Wait()
+				close(waitDone)
+			}()
+
+			const shutdownWaitTimeout = 5 * time.Second
+			select {
+			case <-waitDone:
+				auth.RevokeToken(settings, tokenData, logCh)
+				close(logCh)
+				<-doneLogger
+			case <-time.After(shutdownWaitTimeout):
+				// lingering worker가 있으면 log 채널 close 시 panic 가능성이 있어 강제 대기만 중단한다.
+				logging.Easylog(logCh, "WARN", fmt.Sprintf("Shutdown wait timeout (%s). Some workers may still be stopping.", shutdownWaitTimeout))
+			}
 		})
 	}
 }
