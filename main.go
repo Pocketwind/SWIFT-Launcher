@@ -372,7 +372,6 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 
 	go func() {
 		<-sigCh
-		shutdown("Ctrl+C detected. Exiting application...")
 		os.Exit(0)
 	}()
 
