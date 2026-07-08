@@ -104,7 +104,7 @@ ON CONFLICT(distribution_id) DO UPDATE SET
 	received_at_ms=excluded.received_at_ms,
 	raw_text=excluded.raw_text,
 	raw_hash=excluded.raw_hash
-`, partnerName, message.Message.Direction, message.Message.Requestor, message.Message.Responder, message.Message.MessageType, message.Message.SenderReference, message.Message.NetworkInfo.ServiceCode, message.Distribution.ID, nowMs, rawText, rawHash)
+`, partnerName, message.Message.Direction, message.Message.Requestor, message.Message.Responder, message.Message.MessageType, message.Message.SenderReference, message.Message.NetworkInfo.NetworkPriority, message.Distribution.ID, nowMs, rawText, rawHash)
 	if err != nil {
 		return fmt.Errorf("insert/update mx_messages: %w", err)
 	}
