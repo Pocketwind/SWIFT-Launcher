@@ -18,6 +18,7 @@ type MXMessage struct {
 	NetworkInfo     NetworkInfo `json:"network_info"`     //MT랑 약간 달라서 확인해봐야함
 	Format          string      `json:"format"`           //MX or AnyXML
 	Payload         string      `json:"payload"`          //Envelope로 감싼 AppHeader, Body Documents
+	MX              MX          `json:"mx"`               //MX 구조
 }
 type MXReport struct { //Report 다운로드한거
 	Distribution       Distribution         `json:"distribution"`

@@ -1,22 +1,19 @@
 package messaging
 
 import (
-	"encoding/base64"
 	"fmt"
 	"strings"
+
+	"github.com/Pocketwind/SWIFT-Launcher/fsutil"
+	"github.com/antchfx/xmlquery"
 )
 
 func MTParser(payload string) (MT, error) {
-	//base64 decode
-	payloadDecoded, err := base64.StdEncoding.DecodeString(payload)
-	if err != nil {
-		return MT{}, fmt.Errorf("error decoding payload: %w", err)
-	}
 
-	lines := strings.Split(string(payloadDecoded), "\n")
+	lines := strings.Split(payload, "\n")
 
 	var mt MT
-	for idx, line := range lines {
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -24,7 +21,11 @@ func MTParser(payload string) (MT, error) {
 
 		field, data, ok := splitTaggedLine(line)
 		if !ok {
-			return MT{}, fmt.Errorf("invalid MT field format at line %d: %s", idx+1, line)
+			//줄바꿈인 경우(:로 시작 안하는거)는 data에 newline 후 추가
+			if len(mt.Line) > 0 {
+				mt.Line[len(mt.Line)-1].Data += "\n" + line
+				continue
+			}
 		}
 
 		mt.Line = append(mt.Line, Field{
@@ -53,4 +54,27 @@ func splitTaggedLine(line string) (string, string, bool) {
 	}
 
 	return field, data, true
+}
+
+func MXParser(payload string) (MX, error) {
+	var mx MX
+
+	bodyDoc, err := xmlquery.Parse(strings.NewReader(payload))
+	if err != nil {
+		return MX{}, fmt.Errorf("error parsing body XML: %w", err)
+	}
+	mx.AppHeader = xmlquery.FindOne(bodyDoc, "//*[local-name()='AppHdr']").OutputXML(true)
+	mx.Document = xmlquery.FindOne(bodyDoc, "//*[local-name()='Document']").OutputXML(true)
+
+	mx.AppHeader, err = fsutil.FormatXMLString(mx.AppHeader)
+	if err != nil {
+		return MX{}, fmt.Errorf("error formatting AppHeader XML: %w", err)
+	}
+
+	mx.Document, err = fsutil.FormatXMLString(mx.Document)
+	if err != nil {
+		return MX{}, fmt.Errorf("error formatting Document XML: %w", err)
+	}
+
+	return mx, nil
 }

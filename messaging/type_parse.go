@@ -8,3 +8,8 @@ type Field struct {
 type MT struct {
 	Line []Field `json:"line"`
 }
+
+type MX struct {
+	AppHeader string `json:"app_header"`
+	Document  string `json:"document"`
+}

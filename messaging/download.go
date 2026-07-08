@@ -268,9 +268,28 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 		distID := strconv.Itoa(message.Distribution.ID)
 		routed := false
 		written := false
+		//base64 디코드
+		messageDecoded, err := base64.StdEncoding.DecodeString(message.Message.Payload)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error decoding MX message payload for distribution %d: %v", message.Distribution.ID, err))
+			continue
+		}
+		message.Message.Payload = string(messageDecoded)
+		//parse
+		mx, err := MXParser(message.Message.Payload)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MX message for distribution %d: %v", message.Distribution.ID, err))
+			continue
+		}
+		message.Message.MX = mx
 		//파트너별로 라우팅
 		for _, partner := range partners {
-			if MXRouter(partner.Route, message.Message) { //라우팅 기능 임시 off 무조건 true
+			if MXRouter(partner.Route, message.Message) {
+				//db 저장
+				if dbErr := WriteMXMessageToSQL(message, partner.Name); dbErr != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MX message to SQL for distribution %d: %v", message.Distribution.ID, dbErr))
+					continue
+				}
 				routed = true
 				outputPath := fsutil.PathHelper(partner.OutputPath)
 				if tag := message.Distribution.DistributionTag; tag != "" {
@@ -345,15 +364,6 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 	}
 	defer resp.Body.Close()
 	response, _ := io.ReadAll(resp.Body)
-	/*
-		//파일로 저장
-		filePath := fsutil.PathHelper(settings.Messaging.DownloadPath) + "/" + ranges + ".json"
-		err = os.WriteFile(filePath, response, 0644)
-		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %s: %v", ranges, err))
-			return err
-		}
-	*/
 	//payload 분리
 	var reports []MXReport
 	err = json.Unmarshal(response, &reports)
@@ -366,9 +376,28 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 		distID := strconv.Itoa(report.Distribution.ID)
 		routed := false
 		written := false
+		//base64 디코드
+		payloadDecoded, err := base64.StdEncoding.DecodeString(report.TransmissionReport.Message.Payload)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error decoding payload for distribution %d: %v", report.Distribution.ID, err))
+			continue
+		}
+		report.TransmissionReport.Message.Payload = string(payloadDecoded)
+		//parse
+		mx, err := MXParser(report.TransmissionReport.Message.Payload)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MX message for distribution %d: %v", report.Distribution.ID, err))
+			continue
+		}
+		report.TransmissionReport.Message.MX = mx
 		//파트너별로 라우팅
 		for _, partner := range partners {
-			if MXRouter(partner.Route, report.TransmissionReport.Message) { //라우팅 기능 임시 off 무조건 true
+			if MXRouter(partner.Route, report.TransmissionReport.Message) {
+				//db 저장
+				if dbErr := WriteMXReportToSQL(report, partner.Name); dbErr != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MX report to SQL for distribution %d: %v", report.Distribution.ID, dbErr))
+					continue
+				}
 				routed = true
 				ackPath := fsutil.PathHelper(partner.AckPath)
 				if tag := report.Distribution.DistributionTag; tag != "" {
@@ -465,9 +494,32 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 		distID := strconv.Itoa(report.Distribution.ID)
 		routed := false
 		written := false
+		//base64 디코드
+		payloadDecoded, err := base64.StdEncoding.DecodeString(report.TransmissionReport.Message.Payload)
+		if err != nil {
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error decoding payload for distribution %d: %v", report.Distribution.ID, err))
+			continue
+		}
+		report.TransmissionReport.Message.Payload = string(payloadDecoded)
+		//ACK는 Direction Ack로 변경
+		//report.TransmissionReport.Message.Direction = "Ack"
+		//전문 구조화
+		mt, err := MTParser(report.TransmissionReport.Message.Payload)
+		report.TransmissionReport.Message.MT = mt
 		//파트너별로 라우팅
 		for _, partner := range partners {
-			if MTRouter(partner.Route, report.TransmissionReport.Message) { //라우팅 기능 임시 off 무조건 true
+			if MTRouter(partner.Route, report.TransmissionReport.Message) {
+				//db 저장
+				if err != nil {
+					if dbErr := WriteMTAckToSQL(report, err, partner.Name); dbErr != nil {
+						logging.Easylog(logCh, "WARN", fmt.Sprintf("Failed to persist MT parse failure for distribution %d: %v", report.Distribution.ID, dbErr))
+					}
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MT message for distribution %d: %v", report.Distribution.ID, err))
+					continue
+				}
+				if dbErr := WriteMTAckToSQL(report, nil, partner.Name); dbErr != nil {
+					logging.Easylog(logCh, "WARN", fmt.Sprintf("Failed to persist MT parse success for distribution %d: %v", report.Distribution.ID, dbErr))
+				}
 				routed = true
 				ackPath := fsutil.PathHelper(partner.AckPath)
 				if tag := report.Distribution.DistributionTag; tag != "" {
@@ -565,17 +617,32 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 		distID := strconv.Itoa(message.Distribution.ID)
 		routed := false
 		written := false
-		//전문 구조화
-		mt, err := MTParser(message.Message.Payload)
+		//Payload base64 디코드
+		payloadDecoded, err := base64.StdEncoding.DecodeString(message.Message.Payload)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MT message for distribution %d: %v", message.Distribution.ID, err))
+			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error decoding payload for distribution %d: %v", message.Distribution.ID, err))
 			continue
 		}
+		message.Message.Payload = string(payloadDecoded)
+		//전문 구조화
+		mt, err := MTParser(message.Message.Payload)
 		message.Message.MT = mt
-		logging.Easylog(logCh, "INFO", fmt.Sprintf("%v", mt))
+		//logging.Easylog(logCh, "INFO", fmt.Sprintf("%v", mt))
 		//파트너별로 라우팅
 		for _, partner := range partners {
-			if MTRouter(partner.Route, message.Message) { //라우팅 기능 임시 off 무조건 true
+			if MTRouter(partner.Route, message.Message) {
+				//db 저장
+				if err != nil {
+					if dbErr := WriteMTMessageToSQL(message, err, partner.Name); dbErr != nil {
+						logging.Easylog(logCh, "WARN", fmt.Sprintf("Failed to persist MT parse failure for distribution %d: %v", message.Distribution.ID, dbErr))
+					}
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MT message for distribution %d: %v", message.Distribution.ID, err))
+					continue
+				}
+				message.Message.MT = mt
+				if dbErr := WriteMTMessageToSQL(message, nil, partner.Name); dbErr != nil {
+					logging.Easylog(logCh, "WARN", fmt.Sprintf("Failed to persist MT message to SQLite for distribution %d: %v", message.Distribution.ID, dbErr))
+				}
 				routed = true
 				outputPath := fsutil.PathHelper(partner.OutputPath)
 				if tag := message.Distribution.DistributionTag; tag != "" {

@@ -53,11 +53,7 @@ func FINMessageMaker(messages MTDownload) (string, error) {
 	//Start of the block 4
 	stringBuilder.WriteString("{4:")
 	//Payload
-	payloadDecoded, err := base64.StdEncoding.DecodeString(messages.Message.Payload)
-	if err != nil {
-		return "", fmt.Errorf("error decoding payload: %w", err)
-	}
-	stringBuilder.WriteString(string(payloadDecoded))
+	stringBuilder.WriteString(messages.Message.Payload)
 	//End of the block 4
 	stringBuilder.WriteString("\r\n-}")
 
@@ -117,11 +113,14 @@ func MXMessageMaker(message MXDownload) (string, error) {
 	}
 
 	//Body XML 추출
-	payloadDecoded, err := base64.StdEncoding.DecodeString(message.Message.Payload)
-	if err != nil {
-		return "", fmt.Errorf("error decoding payload: %w", err)
-	}
-	body := string(payloadDecoded)
+	/*
+		payloadDecoded, err := base64.StdEncoding.DecodeString(message.Message.Payload)
+		if err != nil {
+			return "", fmt.Errorf("error decoding payload: %w", err)
+		}
+		body := string(payloadDecoded)
+	*/
+	body := message.Message.Payload
 	bodyDoc, err := xmlquery.Parse(strings.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("error parsing body XML: %w", err)
@@ -257,11 +256,14 @@ func MXReportMaker(report MXReport) (string, error) {
 	}
 
 	//Body XML 생성 (Envelope 제거)
-	payloadDecoded, err := base64.StdEncoding.DecodeString(report.TransmissionReport.Message.Payload)
-	if err != nil {
-		return "", fmt.Errorf("error decoding report: %w", err)
-	}
-	body := string(payloadDecoded)
+	/*
+		payloadDecoded, err := base64.StdEncoding.DecodeString(report.TransmissionReport.Message.Payload)
+		if err != nil {
+			return "", fmt.Errorf("error decoding report: %w", err)
+		}
+		body := string(payloadDecoded)
+	*/
+	body := report.TransmissionReport.Message.Payload
 	bodyDoc, err := xmlquery.Parse(strings.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("error parsing body XML: %w", err)

@@ -20,6 +20,7 @@ import (
 	"github.com/Pocketwind/SWIFT-Launcher/httpclient"
 	"github.com/Pocketwind/SWIFT-Launcher/logging"
 	"github.com/Pocketwind/SWIFT-Launcher/messaging"
+	"github.com/Pocketwind/SWIFT-Launcher/search"
 	"github.com/Pocketwind/SWIFT-Launcher/useragent"
 	"github.com/kardianos/service"
 )
@@ -98,6 +99,13 @@ func main() {
 			return
 		case "console":
 			app(true, nil)
+			return
+		case "search":
+			args := os.Args[2:]
+			err := search.SearchMessages(args)
+			if err != nil {
+				fmt.Printf("Search failed: %v\n", err)
+			}
 			return
 		case "help":
 			showHelp()
@@ -552,6 +560,7 @@ func showHelp() {
 	fmt.Println("restart   - Restart the service")
 	fmt.Println("status    - Show service status")
 	fmt.Println("console   - Run in console mode")
+	fmt.Println("search      - Search messages")
 	fmt.Println("help      - Show this help")
 	fmt.Println("status    - Show partners and runtime status")
 }
