@@ -100,6 +100,13 @@ func main() {
 		case "console":
 			app(true, nil)
 			return
+		case "export":
+			args := os.Args[2:]
+			err := search.ExportMessages(args)
+			if err != nil {
+				fmt.Printf("Export failed: %v\n", err)
+			}
+			return
 		case "search":
 			args := os.Args[2:]
 			err := search.SearchMessages(args)
@@ -560,7 +567,8 @@ func showHelp() {
 	fmt.Println("restart   - Restart the service")
 	fmt.Println("status    - Show service status")
 	fmt.Println("console   - Run in console mode")
-	fmt.Println("search      - Search messages")
+	fmt.Println("search    - Search messages")
+	fmt.Println("export    - Export messages")
 	fmt.Println("help      - Show this help")
 	fmt.Println("status    - Show partners and runtime status")
 }

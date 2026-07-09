@@ -288,7 +288,7 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 				//db 저장
 				if dbErr := WriteMXMessageToSQL(message, partner.Name); dbErr != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MX message to SQL for distribution %d: %v", message.Distribution.ID, dbErr))
-					continue
+					//continue
 				}
 				routed = true
 				outputPath := fsutil.PathHelper(partner.OutputPath)
@@ -396,7 +396,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 				//db 저장
 				if dbErr := WriteMXReportToSQL(report, partner.Name); dbErr != nil {
 					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MX report to SQL for distribution %d: %v", report.Distribution.ID, dbErr))
-					continue
+					//continue
 				}
 				routed = true
 				ackPath := fsutil.PathHelper(partner.AckPath)
@@ -510,15 +510,10 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 		for _, partner := range partners {
 			if MTRouter(partner.Route, report.TransmissionReport.Message) {
 				//db 저장
-				if err != nil {
-					if dbErr := WriteMTAckToSQL(report, err, partner.Name); dbErr != nil {
-						logging.Easylog(logCh, "WARN", fmt.Sprintf("Failed to persist MT parse failure for distribution %d: %v", report.Distribution.ID, dbErr))
-					}
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MT message for distribution %d: %v", report.Distribution.ID, err))
-					continue
-				}
-				if dbErr := WriteMTAckToSQL(report, nil, partner.Name); dbErr != nil {
-					logging.Easylog(logCh, "WARN", fmt.Sprintf("Failed to persist MT parse success for distribution %d: %v", report.Distribution.ID, dbErr))
+				dbErr := WriteMTReportToSQL(report, partner.Name)
+				if dbErr != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MT report to SQL for distribution %d: %v", report.Distribution.ID, dbErr))
+					//continue
 				}
 				routed = true
 				ackPath := fsutil.PathHelper(partner.AckPath)
@@ -632,16 +627,10 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 		for _, partner := range partners {
 			if MTRouter(partner.Route, message.Message) {
 				//db 저장
-				if err != nil {
-					if dbErr := WriteMTMessageToSQL(message, err, partner.Name); dbErr != nil {
-						logging.Easylog(logCh, "WARN", fmt.Sprintf("Failed to persist MT parse failure for distribution %d: %v", message.Distribution.ID, dbErr))
-					}
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MT message for distribution %d: %v", message.Distribution.ID, err))
-					continue
-				}
-				message.Message.MT = mt
-				if dbErr := WriteMTMessageToSQL(message, nil, partner.Name); dbErr != nil {
-					logging.Easylog(logCh, "WARN", fmt.Sprintf("Failed to persist MT message to SQLite for distribution %d: %v", message.Distribution.ID, dbErr))
+				dbErr := WriteMTMessageToSQL(message, partner.Name)
+				if dbErr != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MT message to SQL for distribution %d: %v", message.Distribution.ID, dbErr))
+					//continue
 				}
 				routed = true
 				outputPath := fsutil.PathHelper(partner.OutputPath)

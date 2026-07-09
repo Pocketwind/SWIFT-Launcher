@@ -1,77 +1,14 @@
 package messaging
 
 import (
-	"database/sql"
-	"errors"
 	"fmt"
-	"sync"
 	"time"
 )
 
-var (
-	mxDBOnce sync.Once
-	mxDB     *sql.DB
-	mxDBErr  error
-)
-
-func getMXDB() (*sql.DB, error) {
-	mxDBOnce.Do(func() {
-		db, err := sql.Open("sqlite", "messages.db")
-		if err != nil {
-			mxDBErr = fmt.Errorf("open sqlite db: %w", err)
-			return
-		}
-
-		if _, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS mx_messages (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	partner_name TEXT NOT NULL,
-	direction TEXT NOT NULL,
-	requestor TEXT NOT NULL,
-	responder TEXT NOT NULL,
-	type TEXT NOT NULL,
-	sender_reference TEXT NOT NULL,
-	priority TEXT NOT NULL,
-	distribution_id INTEGER NOT NULL UNIQUE,
-	received_at_ms INTEGER NOT NULL,
-	raw_text TEXT NOT NULL,
-	raw_hash TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS mx_data (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	message_id INTEGER NOT NULL,
-	app_header TEXT NOT NULL,
-	document TEXT NOT NULL,
-	FOREIGN KEY (message_id) REFERENCES mx_messages(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_mx_messages_distribution_id ON mx_messages(distribution_id);
-CREATE INDEX IF NOT EXISTS idx_mx_data_message_id ON mx_data(message_id);
-CREATE INDEX IF NOT EXISTS idx_mx_data_app_header ON mx_data(app_header);
-`); err != nil {
-			_ = db.Close()
-			mxDBErr = fmt.Errorf("init sqlite schema: %w", err)
-			return
-		}
-
-		mxDB = db
-	})
-
-	if mxDBErr != nil {
-		return nil, mxDBErr
-	}
-	if mxDB == nil {
-		return nil, errors.New("sqlite db not initialized")
-	}
-
-	return mxDB, nil
-}
-
 func WriteMXMessageToSQL(message MXDownload, partnerName string) error {
-	db, err := getMXDB()
+	db, err := getDB()
 	if err != nil {
-		return fmt.Errorf("getMXDB: %w", err)
+		return fmt.Errorf("getDB: %w", err)
 	}
 
 	rawText := message.Message.Payload
@@ -91,26 +28,41 @@ func WriteMXMessageToSQL(message MXDownload, partnerName string) error {
 
 	nowMs := time.Now().UnixMilli()
 	_, err = tx.Exec(`
-INSERT INTO mx_messages (partner_name, direction, requestor, responder, type, sender_reference, priority, distribution_id, received_at_ms, raw_text, raw_hash)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO messages 
+(partner_name, direction, sender, receiver, message_type, service, possible_duplicate, 
+service_code, usage_identifier, sender_reference, tag, priority, distribution_id, 
+message_cloud_reference, received_at_ms, raw_text, raw_hash)
+
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
 ON CONFLICT(distribution_id) DO UPDATE SET
 	partner_name=excluded.partner_name,
 	direction=excluded.direction,
-	requestor=excluded.requestor,
-	responder=excluded.responder,
-	type=excluded.type,
+	sender=excluded.sender,
+	receiver=excluded.receiver,
+	message_type=excluded.message_type,
+	service=excluded.service,
+	possible_duplicate=excluded.possible_duplicate,
+	service_code=excluded.service_code,
+	usage_identifier=excluded.usage_identifier,
 	sender_reference=excluded.sender_reference,
+	tag=excluded.tag,
 	priority=excluded.priority,
+	distribution_id=excluded.distribution_id,
+	message_cloud_reference=excluded.message_cloud_reference,
 	received_at_ms=excluded.received_at_ms,
 	raw_text=excluded.raw_text,
 	raw_hash=excluded.raw_hash
-`, partnerName, message.Message.Direction, message.Message.Requestor, message.Message.Responder, message.Message.MessageType, message.Message.SenderReference, message.Message.NetworkInfo.NetworkPriority, message.Distribution.ID, nowMs, rawText, rawHash)
+`, partnerName, message.Message.Direction, message.Message.Requestor, message.Message.Responder, message.Message.MessageType,
+		message.Distribution.Service, message.Distribution.PossibleDuplicate, message.Message.ServiceCode, message.Message.UsageIdentifier,
+		message.Message.SenderReference, message.Distribution.DistributionTag, message.Message.NetworkInfo.NetworkPriority,
+		message.Distribution.ID, message.Distribution.CloudReference, nowMs, rawText, rawHash)
 	if err != nil {
-		return fmt.Errorf("insert/update mx_messages: %w", err)
+		return fmt.Errorf("insert/update messages: %w", err)
 	}
 
 	var messageID int64
-	err = tx.QueryRow(`SELECT id FROM mx_messages WHERE distribution_id = ?`, message.Distribution.ID).Scan(&messageID)
+	err = tx.QueryRow(`SELECT id FROM messages WHERE distribution_id = ?`, message.Distribution.ID).Scan(&messageID)
 	if err != nil {
 		return fmt.Errorf("get mx_message id: %w", err)
 	}
@@ -134,9 +86,9 @@ ON CONFLICT(distribution_id) DO UPDATE SET
 }
 
 func WriteMXReportToSQL(report MXReport, partnerName string) error {
-	db, err := getMXDB()
+	db, err := getDB()
 	if err != nil {
-		return fmt.Errorf("getMXDB: %w", err)
+		return fmt.Errorf("getDB: %w", err)
 	}
 
 	rawText := report.TransmissionReport.Message.Payload
@@ -156,28 +108,44 @@ func WriteMXReportToSQL(report MXReport, partnerName string) error {
 
 	nowMs := time.Now().UnixMilli()
 	_, err = tx.Exec(`
-INSERT INTO mx_messages (partner_name, direction, requestor, responder, type, sender_reference, priority, distribution_id, received_at_ms, raw_text, raw_hash)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO messages 
+(partner_name, direction, sender, receiver, message_type, service, possible_duplicate, 
+service_code, usage_identifier, sender_reference, tag, priority, distribution_id, 
+message_cloud_reference, received_at_ms, raw_text, raw_hash)
+
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
 ON CONFLICT(distribution_id) DO UPDATE SET
 	partner_name=excluded.partner_name,
 	direction=excluded.direction,
-	requestor=excluded.requestor,
-	responder=excluded.responder,
-	type=excluded.type,
+	sender=excluded.sender,
+	receiver=excluded.receiver,
+	message_type=excluded.message_type,
+	service=excluded.service,
+	possible_duplicate=excluded.possible_duplicate,
+	service_code=excluded.service_code,
+	usage_identifier=excluded.usage_identifier,
 	sender_reference=excluded.sender_reference,
+	tag=excluded.tag,
 	priority=excluded.priority,
+	distribution_id=excluded.distribution_id,
+	message_cloud_reference=excluded.message_cloud_reference,
 	received_at_ms=excluded.received_at_ms,
 	raw_text=excluded.raw_text,
 	raw_hash=excluded.raw_hash
-`, partnerName, report.TransmissionReport.Message.Direction, report.TransmissionReport.Message.Requestor, report.TransmissionReport.Message.Responder, report.TransmissionReport.Message.MessageType, report.TransmissionReport.Message.SenderReference, report.TransmissionReport.Message.NetworkInfo.NetworkPriority, report.Distribution.ID, nowMs, rawText, rawHash)
+`, partnerName, report.TransmissionReport.Message.Direction, report.TransmissionReport.Message.Requestor, report.TransmissionReport.Message.Responder,
+		report.TransmissionReport.Message.MessageType, report.Distribution.Service, report.Distribution.PossibleDuplicate,
+		report.TransmissionReport.Message.ServiceCode, report.TransmissionReport.Message.UsageIdentifier,
+		report.TransmissionReport.Message.SenderReference, report.Distribution.DistributionTag, report.TransmissionReport.Message.NetworkInfo.NetworkPriority,
+		report.Distribution.ID, report.Distribution.CloudReference, nowMs, rawText, rawHash)
 	if err != nil {
-		return fmt.Errorf("insert/update mx_messages: %w", err)
+		return fmt.Errorf("insert/update messages: %w", err)
 	}
 
 	var messageID int64
-	err = tx.QueryRow(`SELECT id FROM mx_messages WHERE distribution_id = ?`, report.Distribution.ID).Scan(&messageID)
+	err = tx.QueryRow(`SELECT id FROM messages WHERE distribution_id = ?`, report.Distribution.ID).Scan(&messageID)
 	if err != nil {
-		return fmt.Errorf("get mx_message id: %w", err)
+		return fmt.Errorf("get message id: %w", err)
 	}
 
 	_, err = tx.Exec(`DELETE FROM mx_data WHERE message_id = ?`, messageID)
