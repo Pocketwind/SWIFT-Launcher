@@ -69,6 +69,12 @@ loop:
 }
 
 func enqueueExistingFiles(partner *config.Partner, exitCmd <-chan bool, logCh chan<- logging.LogData) {
+	progressEntries, err := os.ReadDir(partner.ProgressPath)
+	if err != nil {
+		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error reading startup files: %v", err))
+		return
+	}
+
 	//input 쌓인거 처리
 	entries, err := os.ReadDir(partner.InputPath)
 	if err != nil {
@@ -101,13 +107,8 @@ func enqueueExistingFiles(partner *config.Partner, exitCmd <-chan bool, logCh ch
 
 	logging.Easylog(logCh, "INFO", fmt.Sprintf("Startup scan completed: %s (queued=%d)", partner.InputPath, queued))
 
-	//progress 쌓인거 처리
-	entries, err = os.ReadDir(partner.ProgressPath)
-	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error reading startup files: %v", err))
-		return
-	}
-
+	//progress 시작 시점 스냅샷만 재처리해서 input에서 막 옮긴 파일의 중복 enqueue를 막는다.
+	entries = progressEntries
 	logging.Easylog(logCh, "INFO", fmt.Sprintf("Startup scan started: %s", partner.ProgressPath))
 	queued = 0
 
