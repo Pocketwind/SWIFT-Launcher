@@ -370,10 +370,8 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 	if !interactive {
 		logging.Easylog(logCh, "INFO", "Service mode enabled")
 		if serviceStop == nil {
-			select {
-			case <-sigCh:
-				shutdown("Stop signal detected. Exiting application...")
-			}
+			<-sigCh
+			shutdown("Stop signal detected. Exiting application...")
 			return
 		}
 		select {
