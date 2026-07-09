@@ -49,6 +49,11 @@ func getMessageDB() (*sql.DB, error) {
 			messageDBErr = err
 			return
 		}
+		if _, err := db.Exec(`PRAGMA busy_timeout = 5000;`); err != nil {
+			_ = db.Close()
+			messageDBErr = err
+			return
+		}
 		messageDB = db
 	})
 	return messageDB, messageDBErr

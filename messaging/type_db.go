@@ -23,6 +23,12 @@ func getDB() (*sql.DB, error) {
 			return
 		}
 
+		if _, err := db.Exec(`PRAGMA busy_timeout = 5000;`); err != nil {
+			_ = db.Close()
+			DBErr = fmt.Errorf("set sqlite busy_timeout: %w", err)
+			return
+		}
+
 		if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS messages (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
