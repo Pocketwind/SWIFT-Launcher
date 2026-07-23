@@ -27,7 +27,7 @@ func WatchFileService(partner *config.Partner, exitCmd <-chan bool, logCh chan<-
 		return
 	}
 
-	//Input 파트너 progress에 있는더 enqueue
+	//Input 파트너 progress에 있는거 enqueue
 	if partner.Direction == "in" {
 		enqueueExistingFiles(partner, exitCmd, logCh)
 	}
