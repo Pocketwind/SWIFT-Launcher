@@ -56,7 +56,12 @@ const (
 )
 
 type InterfaceInfo struct {
-	ProductInfo string `json:"product_info,omitempty"`
+	ProductInfo ProductInfo `json:"product_info,omitempty"`
+}
+type ProductInfo struct {
+	VendorName  string `json:"vendor_name,omitempty"`
+	ProductName string `json:"product_name,omitempty"`
+	Version     string `json:"version,omitempty"`
 }
 
 //FA
