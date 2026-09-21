@@ -271,7 +271,7 @@ func MXReportMaker(report MXReport) (string, error) {
 	bodyNode := xmlquery.FindOne(bodyDoc, "//*[local-name()='Envelope']").OutputXML(false)
 
 	//합치기
-	finalReport := "<DataPDU><Revision>2.0.10</Revision>\n" + string(headerBytes) + "\n" + bodyNode + "</DataPDU>"
+	finalReport := "<DataPDU><Revision>2.0.10</Revision>\n" + string(headerBytes) + "\n" + "<Body>" + bodyNode + "</Body></DataPDU>"
 	formattedReport, err := fsutil.FormatXMLString(finalReport)
 	if err != nil {
 		return "", err
