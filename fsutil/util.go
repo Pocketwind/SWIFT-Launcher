@@ -1,7 +1,10 @@
 package fsutil
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,67 +27,84 @@ func EnsureDir(dirs ...string) error {
 }
 
 func WaitFileReady(path string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var prevSize int64 = -1
+	return WaitFileReadyContext(context.Background(), path, timeout)
+}
 
-	for time.Now().Before(deadline) {
+func WaitFileReadyContext(parent context.Context, path string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var prevSize int64 = -1
+	var prevMod time.Time
+	var stableSince time.Time
+	// Only a fallback; producers should rename completed temporary files.
+	const stableWindow = time.Second
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("waiting for file %s: %w", path, err)
+		}
 		info, err := os.Stat(path)
 		if err != nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
+			prevSize = -1
+			stableSince = time.Time{}
+		} else {
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("not a regular file: %s", path)
+			}
+			size := info.Size()
+			if size > 0 && size == prevSize && info.ModTime().Equal(prevMod) {
+				if time.Since(stableSince) >= stableWindow {
+					return nil
+				}
+			} else {
+				stableSince = time.Now()
+			}
+			prevSize, prevMod = size, info.ModTime()
 		}
-
-		size := info.Size()
-		if size > 0 && size == prevSize {
-			return nil // 크기 변화 없음 -> 쓰기 완료
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for file %s: %w", path, ctx.Err())
+		case <-ticker.C:
 		}
-		prevSize = size
-		time.Sleep(100 * time.Millisecond)
 	}
+}
 
-	return fmt.Errorf("timeout waiting for file ready: %s", path)
+func AtomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	return AtomicWriteReader(path, bytes.NewReader(data), mode)
+}
+
+// AtomicWriteReader keeps incomplete content out of the final consumer path.
+func AtomicWriteReader(path string, reader io.Reader, mode os.FileMode) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".swift-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	defer file.Close()
+	if err := file.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := io.Copy(file, reader); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
 }
 
 func PathHelper(path string) string {
+	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
 	}
-
-	cleaned := strings.ReplaceAll(path, "\\", "/")
-	cleaned = strings.TrimSpace(cleaned)
-	if cleaned == "" {
-		return ""
-	}
-
-	if cleaned == "." {
-		return "."
-	}
-
-	parts := strings.Split(cleaned, "/")
-	stack := make([]string, 0, len(parts))
-
-	for _, part := range parts {
-		switch part {
-		case "", ".":
-			continue
-		case "..":
-			if len(stack) > 0 {
-				stack = stack[:len(stack)-1]
-			}
-		default:
-			stack = append(stack, part)
-		}
-	}
-
-	if len(stack) == 0 {
-		return "."
-	}
-
-	result := strings.Join(stack, "/")
-	if strings.HasPrefix(path, "/") {
-		return "/" + result
-	}
-	return result
+	// Preserve parent segments and UNC roots using native path semantics.
+	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(strings.ReplaceAll(path, "\\", "/"))))
 }
 
 func GetFileName(path string) string {

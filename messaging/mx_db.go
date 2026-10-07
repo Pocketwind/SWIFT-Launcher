@@ -18,13 +18,7 @@ func WriteMXMessageToSQL(message MXDownload, partnerName string) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		} else {
-			err = tx.Commit()
-		}
-	}()
+	defer tx.Rollback()
 
 	nowMs := time.Now().UnixMilli()
 	_, err = tx.Exec(`
@@ -98,13 +92,7 @@ func WriteMXReportToSQL(report MXReport, partnerName string) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		} else {
-			err = tx.Commit()
-		}
-	}()
+	defer tx.Rollback()
 
 	nowMs := time.Now().UnixMilli()
 	_, err = tx.Exec(`

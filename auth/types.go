@@ -4,6 +4,7 @@ import "sync"
 
 // 토큰 정보 구조체
 type TokenData struct {
+	authMu           sync.Mutex
 	mu               sync.RWMutex `json:"-"`
 	AccessToken      string       `json:"access_token"`
 	RefreshToken     string       `json:"refresh_token"`

@@ -2,12 +2,15 @@ package messaging
 
 import (
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +21,74 @@ import (
 	"github.com/Pocketwind/SWIFT-Launcher/fsutil"
 	"github.com/Pocketwind/SWIFT-Launcher/logging"
 )
+
+func readDownloadResponse(settings *config.Settings, req *http.Request) ([]byte, error) {
+	if settings.Messaging.HttpClient == nil {
+		return nil, errors.New("messaging HTTP client is not configured")
+	}
+	resp, err := settings.Messaging.HttpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("download request returned HTTP %d", resp.StatusCode)
+	}
+	response, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read download response: %w", err)
+	}
+	return response, nil
+}
+
+func recordDownloadError(batchErr *error, logCh chan<- logging.LogData, err error) {
+	*batchErr = errors.Join(*batchErr, err)
+	logging.Easylog(logCh, "ERROR", err.Error())
+}
+
+func acknowledgedIDs(ids map[string]struct{}) []string {
+	result := make([]string, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func requestedDistribution(ids []string, id string) bool {
+	for _, requested := range ids {
+		if id == requested {
+			return true
+		}
+	}
+	return false
+}
+
+func distributionOutputPath(base, tag, name string) (string, error) {
+	if strings.TrimSpace(base) == "" {
+		return "", errors.New("output directory is empty")
+	}
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `\/:`) {
+		return "", fmt.Errorf("invalid output file name %q", name)
+	}
+	tag = strings.ReplaceAll(tag, `\`, "/")
+	if filepath.IsAbs(tag) || strings.HasPrefix(tag, "/") || strings.Contains(tag, ":") {
+		return "", fmt.Errorf("invalid distribution tag %q", tag)
+	}
+	for _, part := range strings.Split(tag, "/") {
+		if part == ".." {
+			return "", fmt.Errorf("distribution tag escapes output directory: %q", tag)
+		}
+	}
+	path := filepath.Join(base, filepath.FromSlash(tag), name)
+	if !fsutil.IsPathUnderDir(path, base) {
+		return "", errors.New("download path escapes output directory")
+	}
+	if err := fsutil.EnsureDir(filepath.Dir(path)); err != nil {
+		return "", err
+	}
+	return path, nil
+}
 
 func DownloadService(settings *config.Settings, tokenData *auth.TokenData, partners []config.Partner, exitCmd <-chan bool, logCh chan<- logging.LogData) {
 	logging.Easylog(logCh, "INFO", "Starting Download Service")
@@ -56,6 +127,12 @@ loop:
 }
 
 func Download(settings *config.Settings, tokenData *auth.TokenData, distributions []Distribution, partners []config.Partner, logCh chan<- logging.LogData) error {
+	if len(distributions) == 0 {
+		return nil
+	}
+	if err := auth.Auth(settings, tokenData, logCh); err != nil {
+		return fmt.Errorf("authenticate download: %w", err)
+	}
 	//다운로드 타입 정의
 	var finMessages []string
 	var finReports []string
@@ -189,10 +266,7 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 	var firstErr error
 
 	for r := range results {
-		if r.err != nil && firstErr == nil {
-			firstErr = r.err
-			continue
-		}
+		firstErr = errors.Join(firstErr, r.err)
 		for _, id := range r.ids {
 			ackSet[id] = struct{}{}
 		}
@@ -202,11 +276,12 @@ func Download(settings *config.Settings, tokenData *auth.TokenData, distribution
 	for id := range ackSet {
 		ackIDs = append(ackIDs, id)
 	}
+	sort.Strings(ackIDs)
 	if len(ackIDs) > 0 {
+		// Files are visible before ACK. If ACK fails, redelivery can recreate a
+		// file already consumed downstream; consumers must deduplicate by ID.
 		err := MultiAck(settings, tokenData, ackIDs, logCh)
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
+		firstErr = errors.Join(firstErr, err)
 	}
 
 	return firstErr
@@ -240,19 +315,16 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 	req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
 	req.Header.Set("Accept", "application/json")
 	//proxy 사용해서 call
-	client := settings.Messaging.HttpClient
-	resp, err := client.Do(req)
+	response, err := readDownloadResponse(settings, req)
 	if err != nil {
-		return nil, fmt.Errorf("error making request: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-	response, _ := io.ReadAll(resp.Body)
 	/*
 		//파일로 저장
 		filePath := fsutil.PathHelper(settings.Messaging.DownloadPath) + "/" + ranges + ".json"
-		err = os.WriteFile(filePath, response, 0644)
+		err = fsutil.AtomicWriteFile(filePath, response, 0644)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %s: %v", ranges, err))
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error writing file for distribution %s: %v", ranges, err))
 			return
 		}
 	*/
@@ -263,48 +335,51 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
 	}
 	ackedSet := make(map[string]struct{})
+	var downloadErr error
 	//전문 생성 및 라우팅
 	for _, message := range downloads {
 		distID := strconv.Itoa(message.Distribution.ID)
+		if !requestedDistribution(ids, distID) {
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("unexpected distribution ID %s in download response", distID))
+			continue
+		}
 		routed := false
 		written := false
 		//base64 디코드
 		messageDecoded, err := base64.StdEncoding.DecodeString(message.Message.Payload)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error decoding MX message payload for distribution %d: %v", message.Distribution.ID, err))
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error decoding MX message payload for distribution %d: %v", message.Distribution.ID, err))
 			continue
 		}
 		message.Message.Payload = string(messageDecoded)
 		//parse
 		mx, err := MXParser(message.Message.Payload)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MX message for distribution %d: %v", message.Distribution.ID, err))
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error parsing MX message for distribution %d: %v", message.Distribution.ID, err))
 			continue
 		}
 		message.Message.MX = mx
 		//파트너별로 라우팅
 		for _, partner := range partners {
 			if MXRouter(partner.Route, message.Message) {
+				routed = true
 				//db 저장
 				if dbErr := WriteMXMessageToSQL(message, partner.Name); dbErr != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MX message to SQL for distribution %d: %v", message.Distribution.ID, dbErr))
-					//continue
+					logging.Easylog(logCh, "WARN", fmt.Sprintf("Optional MX message archive failed for distribution %d; continuing file delivery: %v", message.Distribution.ID, dbErr))
 				}
-				routed = true
-				outputPath := fsutil.PathHelper(partner.OutputPath)
-				if tag := message.Distribution.DistributionTag; tag != "" {
-					outputPath = fsutil.PathHelper(outputPath + "/" + tag)
-				}
-				fsutil.EnsureDir(outputPath)
-				outputPath = fsutil.PathHelper(outputPath + "/" + strconv.Itoa(message.Distribution.ID) + partner.Extension)
-				messageFile, err := MXMessageMaker(message)
+				outputPath, err := distributionOutputPath(partner.OutputPath, message.Distribution.DistributionTag, strconv.Itoa(message.Distribution.ID)+partner.Extension)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating MX message for distribution %d: %v", message.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("output path for distribution %s: %w", distID, err))
 					break
 				}
-				err = os.WriteFile(outputPath, []byte(messageFile), 0644)
+				messageFile, err := MXMessageMaker(message)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", message.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error creating MX message for distribution %d: %v", message.Distribution.ID, err))
+					break
+				}
+				err = fsutil.AtomicWriteFile(outputPath, []byte(messageFile), 0644)
+				if err != nil {
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error writing file for distribution %d: %v", message.Distribution.ID, err))
 					break
 				}
 				written = true
@@ -327,7 +402,7 @@ func downloadInterActMessages(settings *config.Settings, tokenData *auth.TokenDa
 	}
 	//ACK 처리 변경
 	//MultiAck(settings, tokenData, ids, logCh)
-	return ackedIDs, nil
+	return ackedIDs, downloadErr
 }
 
 func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) ([]string, error) {
@@ -357,13 +432,10 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 	req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
 	req.Header.Set("Accept", "application/json")
 	//proxy 사용해서 call
-	client := settings.Messaging.HttpClient
-	resp, err := client.Do(req)
+	response, err := readDownloadResponse(settings, req)
 	if err != nil {
-		return nil, fmt.Errorf("error making request: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-	response, _ := io.ReadAll(resp.Body)
 	//payload 분리
 	var reports []MXReport
 	err = json.Unmarshal(response, &reports)
@@ -371,48 +443,51 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
 	}
 	ackedSet := make(map[string]struct{})
+	var downloadErr error
 	//전문 생성 및 라우팅
 	for _, report := range reports {
 		distID := strconv.Itoa(report.Distribution.ID)
+		if !requestedDistribution(ids, distID) {
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("unexpected distribution ID %s in download response", distID))
+			continue
+		}
 		routed := false
 		written := false
 		//base64 디코드
 		payloadDecoded, err := base64.StdEncoding.DecodeString(report.TransmissionReport.Message.Payload)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error decoding payload for distribution %d: %v", report.Distribution.ID, err))
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error decoding payload for distribution %d: %v", report.Distribution.ID, err))
 			continue
 		}
 		report.TransmissionReport.Message.Payload = string(payloadDecoded)
 		//parse
 		mx, err := MXParser(report.TransmissionReport.Message.Payload)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error parsing MX message for distribution %d: %v", report.Distribution.ID, err))
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error parsing MX message for distribution %d: %v", report.Distribution.ID, err))
 			continue
 		}
 		report.TransmissionReport.Message.MX = mx
 		//파트너별로 라우팅
 		for _, partner := range partners {
 			if MXRouter(partner.Route, report.TransmissionReport.Message) {
+				routed = true
 				//db 저장
 				if dbErr := WriteMXReportToSQL(report, partner.Name); dbErr != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MX report to SQL for distribution %d: %v", report.Distribution.ID, dbErr))
-					//continue
+					logging.Easylog(logCh, "WARN", fmt.Sprintf("Optional MX report archive failed for distribution %d; continuing file delivery: %v", report.Distribution.ID, dbErr))
 				}
-				routed = true
-				ackPath := fsutil.PathHelper(partner.AckPath)
-				if tag := report.Distribution.DistributionTag; tag != "" {
-					ackPath = fsutil.PathHelper(ackPath + "/" + tag)
-				}
-				fsutil.EnsureDir(ackPath)
-				ackPath = fsutil.PathHelper(ackPath + "/" + strconv.Itoa(report.Distribution.ID) + partner.Extension)
-				reportFile, err := MXReportMaker(report)
+				ackPath, err := distributionOutputPath(partner.AckPath, report.Distribution.DistributionTag, strconv.Itoa(report.Distribution.ID)+partner.Extension)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating MX report for distribution %d: %v", report.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("output path for distribution %s: %w", distID, err))
 					break
 				}
-				err = os.WriteFile(ackPath, []byte(reportFile), 0644)
+				reportFile, err := MXReportMaker(report)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error creating MX report for distribution %d: %v", report.Distribution.ID, err))
+					break
+				}
+				err = fsutil.AtomicWriteFile(ackPath, []byte(reportFile), 0644)
+				if err != nil {
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
 					break
 				}
 				written = true
@@ -435,7 +510,7 @@ func downloadInterActReports(settings *config.Settings, tokenData *auth.TokenDat
 	}
 	//ACK 처리
 	//MultiAck(settings, tokenData, ids, logCh)
-	return ackedIDs, nil
+	return ackedIDs, downloadErr
 }
 
 func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) ([]string, error) {
@@ -465,17 +540,14 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 	req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
 	req.Header.Set("Accept", "application/json")
 	//proxy 사용해서 call
-	client := settings.Messaging.HttpClient
-	resp, err := client.Do(req)
+	response, err := readDownloadResponse(settings, req)
 	if err != nil {
-		return nil, fmt.Errorf("error making request: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-	response, _ := io.ReadAll(resp.Body)
 	/*
 		//파일로 저장
 		filePath := fsutil.PathHelper(settings.Messaging.DownloadPath) + "/" + ranges + ".json"
-		err = os.WriteFile(filePath, response, 0644)
+		err = fsutil.AtomicWriteFile(filePath, response, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("error writing file for distribution %s: %w", ranges, err)
 		}
@@ -488,16 +560,21 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
 	}
 	ackedSet := make(map[string]struct{})
+	var downloadErr error
 
 	//전문 생성 및 라우팅
 	for _, report := range reports {
 		distID := strconv.Itoa(report.Distribution.ID)
+		if !requestedDistribution(ids, distID) {
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("unexpected distribution ID %s in download response", distID))
+			continue
+		}
 		routed := false
 		written := false
 		//base64 디코드
 		payloadDecoded, err := base64.StdEncoding.DecodeString(report.TransmissionReport.Message.Payload)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error decoding payload for distribution %d: %v", report.Distribution.ID, err))
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error decoding payload for distribution %d: %v", report.Distribution.ID, err))
 			continue
 		}
 		report.TransmissionReport.Message.Payload = string(payloadDecoded)
@@ -505,31 +582,33 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 		//report.TransmissionReport.Message.Direction = "Ack"
 		//전문 구조화
 		mt, err := MTParser(report.TransmissionReport.Message.Payload)
+		if err != nil {
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("parse FIN payload for distribution %s: %w", distID, err))
+			continue
+		}
 		report.TransmissionReport.Message.MT = mt
 		//파트너별로 라우팅
 		for _, partner := range partners {
 			if MTRouter(partner.Route, report.TransmissionReport.Message) {
+				routed = true
 				//db 저장
 				dbErr := WriteMTReportToSQL(report, partner.Name)
 				if dbErr != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MT report to SQL for distribution %d: %v", report.Distribution.ID, dbErr))
-					//continue
+					logging.Easylog(logCh, "WARN", fmt.Sprintf("Optional MT report archive failed for distribution %d; continuing file delivery: %v", report.Distribution.ID, dbErr))
 				}
-				routed = true
-				ackPath := fsutil.PathHelper(partner.AckPath)
-				if tag := report.Distribution.DistributionTag; tag != "" {
-					ackPath = fsutil.PathHelper(ackPath + "/" + tag)
-				}
-				fsutil.EnsureDir(ackPath)
-				ackPath = fsutil.PathHelper(ackPath + "/" + strconv.Itoa(report.Distribution.ID) + partner.Extension)
-				reportFile, err := FINReportMaker(report)
+				ackPath, err := distributionOutputPath(partner.AckPath, report.Distribution.DistributionTag, strconv.Itoa(report.Distribution.ID)+partner.Extension)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating FIN report for distribution %d: %v", report.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("output path for distribution %s: %w", distID, err))
 					break
 				}
-				err = os.WriteFile(ackPath, []byte(reportFile), 0644)
+				reportFile, err := FINReportMaker(report)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error creating FIN report for distribution %d: %v", report.Distribution.ID, err))
+					break
+				}
+				err = fsutil.AtomicWriteFile(ackPath, []byte(reportFile), 0644)
+				if err != nil {
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
 					break
 				}
 				written = true
@@ -553,7 +632,7 @@ func downloadFINReports(settings *config.Settings, tokenData *auth.TokenData, id
 
 	//ACK 처리
 	//MultiAck(settings, tokenData, ids, logCh)
-	return ackedIDs, nil
+	return ackedIDs, downloadErr
 }
 
 func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) ([]string, error) {
@@ -583,17 +662,14 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 	req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
 	req.Header.Set("Accept", "application/json")
 	//proxy 사용해서 call
-	client := settings.Messaging.HttpClient
-	resp, err := client.Do(req)
+	response, err := readDownloadResponse(settings, req)
 	if err != nil {
-		return nil, fmt.Errorf("error making request: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-	response, _ := io.ReadAll(resp.Body)
 	/*
 		//파일로 저장
 		filePath := fsutil.PathHelper(settings.Messaging.DownloadPath) + "/" + ranges + ".json"
-		err = os.WriteFile(filePath, response, 0644)
+		err = fsutil.AtomicWriteFile(filePath, response, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("error writing file for distribution %s: %w", ranges, err)
 		}
@@ -606,47 +682,54 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
 	}
 	ackedSet := make(map[string]struct{})
+	var downloadErr error
 
 	//전문 생성 및 라우팅
 	for _, message := range downloads {
 		distID := strconv.Itoa(message.Distribution.ID)
+		if !requestedDistribution(ids, distID) {
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("unexpected distribution ID %s in download response", distID))
+			continue
+		}
 		routed := false
 		written := false
 		//Payload base64 디코드
 		payloadDecoded, err := base64.StdEncoding.DecodeString(message.Message.Payload)
 		if err != nil {
-			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error decoding payload for distribution %d: %v", message.Distribution.ID, err))
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error decoding payload for distribution %d: %v", message.Distribution.ID, err))
 			continue
 		}
 		message.Message.Payload = string(payloadDecoded)
 		//전문 구조화
 		mt, err := MTParser(message.Message.Payload)
+		if err != nil {
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("parse FIN payload for distribution %s: %w", distID, err))
+			continue
+		}
 		message.Message.MT = mt
 		//logging.Easylog(logCh, "INFO", fmt.Sprintf("%v", mt))
 		//파트너별로 라우팅
 		for _, partner := range partners {
 			if MTRouter(partner.Route, message.Message) {
+				routed = true
 				//db 저장
 				dbErr := WriteMTMessageToSQL(message, partner.Name)
 				if dbErr != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing MT message to SQL for distribution %d: %v", message.Distribution.ID, dbErr))
-					//continue
+					logging.Easylog(logCh, "WARN", fmt.Sprintf("Optional MT message archive failed for distribution %d; continuing file delivery: %v", message.Distribution.ID, dbErr))
 				}
-				routed = true
-				outputPath := fsutil.PathHelper(partner.OutputPath)
-				if tag := message.Distribution.DistributionTag; tag != "" {
-					outputPath = fsutil.PathHelper(outputPath + "/" + tag)
-				}
-				fsutil.EnsureDir(outputPath)
-				outputPath = fsutil.PathHelper(outputPath + "/" + strconv.Itoa(message.Distribution.ID) + partner.Extension)
-				messageFile, err := FINMessageMaker(message)
+				outputPath, err := distributionOutputPath(partner.OutputPath, message.Distribution.DistributionTag, strconv.Itoa(message.Distribution.ID)+partner.Extension)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating FIN message for distribution %d: %v", message.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("output path for distribution %s: %w", distID, err))
 					break
 				}
-				err = os.WriteFile(outputPath, []byte(messageFile), 0644)
+				messageFile, err := FINMessageMaker(message)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", message.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error creating FIN message for distribution %d: %v", message.Distribution.ID, err))
+					break
+				}
+				err = fsutil.AtomicWriteFile(outputPath, []byte(messageFile), 0644)
+				if err != nil {
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error writing file for distribution %d: %v", message.Distribution.ID, err))
 					break
 				}
 				written = true
@@ -670,7 +753,7 @@ func downloadFINMessages(settings *config.Settings, tokenData *auth.TokenData, i
 
 	//ACK 처리
 	//MultiAck(settings, tokenData, ids, logCh)
-	return ackedIDs, nil
+	return ackedIDs, downloadErr
 }
 
 func downloadFileActReports(settings *config.Settings, tokenData *auth.TokenData, ids []string, partners []config.Partner, logCh chan<- logging.LogData) ([]string, error) {
@@ -707,13 +790,10 @@ func downloadFileActReports(settings *config.Settings, tokenData *auth.TokenData
 	req.Header.Set("Accept", "application/json")
 
 	//proxy 사용해서 call
-	client := settings.Messaging.HttpClient
-	resp, err := client.Do(req)
+	response, err := readDownloadResponse(settings, req)
 	if err != nil {
-		return nil, fmt.Errorf("error making request: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-	response, _ := io.ReadAll(resp.Body)
 
 	//payload 분리
 	var reports []FileActReport
@@ -722,30 +802,34 @@ func downloadFileActReports(settings *config.Settings, tokenData *auth.TokenData
 		return nil, fmt.Errorf("error unmarshalling response for distribution %s: %w", ranges, err)
 	}
 	ackedSet := make(map[string]struct{})
+	var downloadErr error
 
 	//전문 생성 및 라우팅
 	for _, report := range reports {
 		distID := strconv.Itoa(report.Distribution.ID)
+		if !requestedDistribution(ids, distID) {
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("unexpected distribution ID %s in download response", distID))
+			continue
+		}
 		routed := false
 		written := false
 		//파트너별로 라우팅
 		for _, partner := range partners {
 			if FileActRouter(partner, report.TransmissionReport.CompanionInfo) {
 				routed = true
-				ackPath := fsutil.PathHelper(partner.AckPath)
-				if tag := report.Distribution.DistributionTag; tag != "" {
-					ackPath = fsutil.PathHelper(ackPath + "/" + tag)
-				}
-				fsutil.EnsureDir(ackPath)
-				ackPath = fsutil.PathHelper(ackPath + "/" + strconv.Itoa(report.Distribution.ID) + partner.Extension)
-				reportFile, err := FileActReportMaker(report)
+				ackPath, err := distributionOutputPath(partner.AckPath, report.Distribution.DistributionTag, strconv.Itoa(report.Distribution.ID)+partner.Extension)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating FileAct report for distribution %d: %v", report.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("output path for distribution %s: %w", distID, err))
 					break
 				}
-				err = os.WriteFile(ackPath, []byte(reportFile), 0644)
+				reportFile, err := FileActReportMaker(report)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error creating FileAct report for distribution %d: %v", report.Distribution.ID, err))
+					break
+				}
+				err = fsutil.AtomicWriteFile(ackPath, []byte(reportFile), 0644)
+				if err != nil {
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error writing file for distribution %d: %v", report.Distribution.ID, err))
 					break
 				}
 				written = true
@@ -768,12 +852,14 @@ func downloadFileActReports(settings *config.Settings, tokenData *auth.TokenData
 	}
 	//ACK 처리
 	//MultiAck(settings, tokenData, ids, logCh)
-	return ackedIDs, nil
+	return ackedIDs, downloadErr
 }
 
 func GetDistributions(settings *config.Settings, tokenData *auth.TokenData, logCh chan<- logging.LogData) (*Distributions, error) {
 	//Auth
-	auth.Auth(settings, tokenData, logCh)
+	if err := auth.Auth(settings, tokenData, logCh); err != nil {
+		return nil, fmt.Errorf("authenticate distributions: %w", err)
+	}
 	tokenData.RLock()
 	tokenType := tokenData.TokenType
 	accessToken := tokenData.AccessToken
@@ -797,13 +883,10 @@ func GetDistributions(settings *config.Settings, tokenData *auth.TokenData, logC
 	req.Header.Set("Accept", "application/json")
 
 	//proxy 사용해서 call
-	client := settings.Messaging.HttpClient
-	resp, err := client.Do(req)
+	response, err := readDownloadResponse(settings, req)
 	if err != nil {
-		return nil, fmt.Errorf("error making request: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-	response, _ := io.ReadAll(resp.Body)
 	var distributions Distributions
 	err = json.Unmarshal(response, &distributions)
 	if err != nil {
@@ -829,9 +912,12 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 
 	//request body
 	//encryption key 임의 설정 32글자
-	encKey := "01234567890123456789012345678901"
-	encKeyB64 := base64.StdEncoding.EncodeToString([]byte(encKey))
-	encKeyMD5 := md5.Sum([]byte(encKey))
+	encKey := make([]byte, 32)
+	if _, err := rand.Read(encKey); err != nil {
+		return nil, fmt.Errorf("generate download encryption key: %w", err)
+	}
+	encKeyB64 := base64.StdEncoding.EncodeToString(encKey)
+	encKeyMD5 := md5.Sum(encKey)
 	fileTransferRequest := FileTransferRequest{
 		FileAttributes: FileAttributes{
 			FileName: "temp.bin",
@@ -853,6 +939,7 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 		return nil, fmt.Errorf("error marshalling request body: %w", err)
 	}
 	ackedSet := make(map[string]struct{})
+	var downloadErr error
 
 	//FileAct는 한번에 하나만 다운가능
 	//Initiate
@@ -862,7 +949,7 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 		//request 만들기
 		req, err := http.NewRequest("POST", downloadUrl, strings.NewReader(string(bodyBytes)))
 		if err != nil {
-			return nil, fmt.Errorf("error creating request: %w", err)
+			return acknowledgedIDs(ackedSet), errors.Join(downloadErr, fmt.Errorf("error creating request: %w", err))
 		}
 
 		//param
@@ -875,23 +962,18 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 		req.Header.Set("Accept", "application/json")
 
 		//proxy 사용해서 call
-		client := settings.Messaging.HttpClient
-		resp, err := client.Do(req)
+		req.Header.Set("Content-Type", "application/json")
+		response, err := readDownloadResponse(settings, req)
 		if err != nil {
-			return nil, fmt.Errorf("error making request: %w", err)
-		}
-		response, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("error reading response body: %w", err)
+			return acknowledgedIDs(ackedSet), errors.Join(downloadErr, fmt.Errorf("initiate FileAct distribution %s: %w", id, err))
 		}
 		var fileActResponse Distribution
 		err = json.Unmarshal(response, &fileActResponse)
 		if err != nil {
-			return nil, fmt.Errorf("error unmarshalling response: %w", err)
+			return acknowledgedIDs(ackedSet), errors.Join(downloadErr, fmt.Errorf("error unmarshalling response: %w", err))
 		}
-		if len(fileActResponse.FileTransferResponse.SignedURLs) == 0 {
-			logging.Easylog(logCh, "WARN", fmt.Sprintf("No signed URL for FileAct message distribution %s. Skipping ACK.", id))
+		if len(fileActResponse.FileTransferResponse.SignedURLs) != 1 {
+			recordDownloadError(&downloadErr, logCh, fmt.Errorf("expected one signed URL for FileAct distribution %s, got %d; skipping ACK", id, len(fileActResponse.FileTransferResponse.SignedURLs)))
 			continue
 		}
 		//data.Easylog(logCh, "INFO", fmt.Sprintln(string(response)))
@@ -905,21 +987,16 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 		for _, partner := range partners {
 			if FileActRouter(partner, fileActResponse.CompanionInfo) {
 				routed = true
-				outputPath := fsutil.PathHelper(partner.OutputPath)
-				if tag := fileActResponse.DistributionTag; tag != "" {
-					outputPath = fsutil.PathHelper(outputPath + "/" + tag)
-				}
-				err = fsutil.EnsureDir(outputPath)
+				outputPath, err := distributionOutputPath(partner.OutputPath, fileActResponse.DistributionTag, fileActResponse.CompanionInfo.SenderReference+partner.Extension)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error ensuring output dir for distribution %s: %v", id, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("output path for distribution %s: %w", id, err))
 					break
 				}
-				outputPath = fsutil.PathHelper(outputPath + "/" + fileActResponse.CompanionInfo.SenderReference + partner.Extension)
 
 				//Download file
 				req, err := http.NewRequest("GET", signedURL, nil)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating download request for distribution %s: %v", id, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error creating download request for distribution %s: %v", id, err))
 					break
 				}
 				req.Header.Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
@@ -929,33 +1006,20 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 				client := settings.Messaging.HttpClient
 				resp, err := client.Do(req)
 				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error making download request for distribution %s: %v", id, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Error making download request for distribution %s: %v", id, err))
 					break
 				}
 				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 					resp.Body.Close()
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Download request failed for distribution %s with status %s", id, resp.Status))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("Download request failed for distribution %s with status %s", id, resp.Status))
 					break
 				}
 
 				//Write to file
-				outFile, err := os.Create(outputPath)
-				if err != nil {
-					resp.Body.Close()
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error creating output file for distribution %s: %v", id, err))
-					break
-				}
-
-				_, err = io.Copy(outFile, resp.Body)
+				err = fsutil.AtomicWriteReader(outputPath, resp.Body, 0644)
 				resp.Body.Close()
 				if err != nil {
-					outFile.Close()
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing output file for distribution %s: %v", id, err))
-					break
-				}
-				err = outFile.Close()
-				if err != nil {
-					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error closing output file for distribution %s: %v", id, err))
+					recordDownloadError(&downloadErr, logCh, fmt.Errorf("write FileAct distribution %s: %w", id, err))
 					break
 				}
 
@@ -980,5 +1044,5 @@ func downloadFileActMessages(settings *config.Settings, tokenData *auth.TokenDat
 		ackedIDs = append(ackedIDs, id)
 	}
 
-	return ackedIDs, nil
+	return ackedIDs, downloadErr
 }

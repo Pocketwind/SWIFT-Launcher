@@ -20,11 +20,7 @@ func WriteMTMessageToSQL(message MTDownload, partnerName string) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
+	defer tx.Rollback()
 
 	nowMs := time.Now().UnixMilli()
 	_, err = tx.Exec(`
@@ -106,11 +102,7 @@ func WriteMTReportToSQL(report MTReport, partnerName string) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
+	defer tx.Rollback()
 
 	nowMs := time.Now().UnixMilli()
 	_, err = tx.Exec(`

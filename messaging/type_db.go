@@ -22,10 +22,19 @@ func getDB() (*sql.DB, error) {
 			DBErr = fmt.Errorf("open sqlite db: %w", err)
 			return
 		}
+		// These SQLite PRAGMAs apply to an individual connection.
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
 
 		if _, err := db.Exec(`PRAGMA busy_timeout = 5000;`); err != nil {
 			_ = db.Close()
 			DBErr = fmt.Errorf("set sqlite busy_timeout: %w", err)
+			return
+		}
+
+		if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
+			_ = db.Close()
+			DBErr = fmt.Errorf("enable sqlite foreign keys: %w", err)
 			return
 		}
 

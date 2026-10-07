@@ -1,8 +1,12 @@
 package messaging
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/Pocketwind/SWIFT-Launcher/auth"
 	"github.com/Pocketwind/SWIFT-Launcher/config"
@@ -11,208 +15,190 @@ import (
 )
 
 func CollectorService(settings *config.Settings, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, exitCmd <-chan bool) {
-	//partner status false면 끄기
 	if !partner.Status {
 		logging.Easylog(logCh, "INFO", "Collector is disabled for partner: "+partner.Name)
 		return
 	}
-
 	logging.Easylog(logCh, "INFO", "Starting Collector for partner: "+partner.Name)
-
-loop:
+	defer logging.Easylog(logCh, "INFO", "Collector stopped for partner: "+partner.Name)
 	for {
+		// Prioritize shutdown even if many inputs are queued.
 		select {
-		case filePath := <-partner.InputChannel:
-			//파일 확장자 체크
-			if fsutil.GetFileExt(filePath) != partner.Extension {
-				logging.Easylog(logCh, "ERROR", "Skipping file with unsupported extension: "+filePath+" ("+partner.Name+")")
-				/*
-					errorPath := fsutil.PathHelper(partner.ErrorPath + "/" + fsutil.GetFileName(filePath))
-					err := os.Rename(fsutil.PathHelper(filePath), errorPath)
-					if err != nil {
-						logging.Easylog(logCh, "ERROR", "Failed to move file to error directory: "+err.Error())
-					}
-				*/
-				continue
-			}
-			//맞는 파일 처리
-			logging.Easylog(logCh, "INFO", "Processing file: "+filePath+" ("+partner.Name+")")
-			//PDE 체크(progress에 있으면 PDE붙이기)
-			isPDE := fsutil.IsPathUnderDir(filePath, partner.ProgressPath)
-			//in_progress로 이동
-			progressPath := fsutil.PathHelper(partner.ProgressPath + "/" + fsutil.GetFileName(filePath))
-			err := os.Rename(fsutil.PathHelper(filePath), fsutil.PathHelper(progressPath))
-			if err != nil {
-				logging.Easylog(logCh, "ERROR", "Failed to move file to progress directory: "+err.Error())
-				continue
-			}
-			switch partner.Type {
-			case "interAct": //MX
-				err := processMXFile(settings, progressPath, partner, tokenData, logCh, isPDE)
-				if err != nil {
-					logging.Easylog(logCh, "ERROR", "Failed to process MX file: "+err.Error())
-				}
-			case "fin": //MT
-				err := processMTFile(settings, progressPath, partner, tokenData, logCh, isPDE)
-				if err != nil {
-					logging.Easylog(logCh, "ERROR", "Failed to process MT file: "+err.Error())
-				}
-			case "fileAct": //FileAct
-				if partner.IsDFA { //DFA
-					err := processDFAFile(settings, progressPath, partner, tokenData, logCh, isPDE)
-					if err != nil {
-						logging.Easylog(logCh, "ERROR", "Failed to process DFA file: "+err.Error())
-					}
-				} else { //일반 FA
-					err := processFileActFile(settings, progressPath, partner, tokenData, logCh, isPDE)
-					if err != nil {
-						logging.Easylog(logCh, "ERROR", "Failed to process FileAct file: "+err.Error())
-					}
-				}
-			}
 		case <-exitCmd:
-			break loop
+			return
+		default:
+		}
+		select {
+		case <-exitCmd:
+			return
+		case filePath, ok := <-partner.InputChannel:
+			if !ok {
+				return
+			}
+			select {
+			case <-exitCmd:
+				return
+			default:
+			}
+			if fsutil.GetFileExt(filePath) != partner.Extension {
+				continue
+			}
+			if fsutil.IsPathUnderDir(filePath, partner.ProgressPath) {
+				logging.Easylog(logCh, "WARN", "Held progress file requires remote reconciliation before resubmission: "+filePath)
+				continue
+			}
+			if !fsutil.IsPathUnderDir(filePath, partner.InputPath) {
+				logging.Easylog(logCh, "ERROR", "Input file is outside the configured input directory: "+filePath)
+				continue
+			}
+			progressPath := filepath.Join(partner.ProgressPath, fsutil.GetFileName(filePath))
+			// A previous unresolved attempt must never be overwritten.
+			if _, err := os.Lstat(progressPath); !os.IsNotExist(err) {
+				logging.Easylog(logCh, "ERROR", "Progress destination already exists or cannot be checked; input held: "+progressPath)
+				continue
+			}
+			if err := os.Rename(fsutil.PathHelper(filePath), fsutil.PathHelper(progressPath)); err != nil {
+				logging.Easylog(logCh, "ERROR", "Failed to claim input file: "+err.Error())
+				continue
+			}
+			logging.Easylog(logCh, "INFO", "Processing file: "+progressPath+" ("+partner.Name+")")
+			var err error
+			switch partner.Type {
+			case "interAct":
+				err = processMXFile(settings, progressPath, partner, tokenData, logCh, false)
+			case "fin":
+				err = processMTFile(settings, progressPath, partner, tokenData, logCh, false)
+			case "fileAct":
+				if partner.IsDFA {
+					err = processDFAFile(settings, progressPath, partner, tokenData, logCh, false)
+				} else {
+					err = processFileActFile(settings, progressPath, partner, tokenData, logCh, false)
+				}
+			default:
+				err = routeSendFailure(progressPath, partner, fmt.Errorf("unsupported partner type %q", partner.Type))
+			}
+			if err != nil {
+				logging.Easylog(logCh, "ERROR", "Failed to process outgoing file: "+err.Error())
+			}
 		}
 	}
-	logging.Easylog(logCh, "INFO", "Collector Stopped for partner: "+partner.Name)
 }
 
-func processFileActFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
-	//FileAct 데이터 생성
-	fadata, err := FileActDataMaker(filePath, partner, logCh)
-	if err != nil {
-		ferr := ErrorMessageRouter(filePath, partner)
-		if ferr != nil {
-			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
-		}
-		return fmt.Errorf("failed to create FileAct data: %w", err)
-	}
-
-	//send
-	response, err := FileActSender(fadata, filePath, tokenData, partner, settings, logCh, isPDE)
-	if err != nil {
-		ferr := ErrorMessageRouter(filePath, partner)
-		if ferr != nil {
-			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
+func routeSendFailure(filePath string, partner *config.Partner, err error) error {
+	var uncertain *UncertainSendError
+	if errors.As(err, &uncertain) {
+		// Progress is never automatically re-enqueued on restart. Persist the
+		// reason alongside the untouched source for operator reconciliation.
+		metadata, _ := json.MarshalIndent(map[string]any{
+			"state": "uncertain", "error": err.Error(), "time": time.Now().UTC().Format(time.RFC3339),
+		}, "", "  ")
+		if writeErr := fsutil.AtomicWriteFile(filePath+".hold.json", metadata, 0600); writeErr != nil {
+			return fmt.Errorf("%w; failed to record held state: %v", err, writeErr)
 		}
 		return err
 	}
+	if routeErr := ErrorMessageRouter(filePath, partner); routeErr != nil {
+		return fmt.Errorf("%w; %v", err, routeErr)
+	}
+	return err
+}
 
-	//완료
-	if isPDE {
-		logging.Easylog(logCh, "WARN", "FileAct message sent successfully with PDE. Response: "+response)
-	} else {
-		logging.Easylog(logCh, "INFO", "FileAct message sent successfully. Response: "+response)
+func archiveSentFile(filePath string, partner *config.Partner, reference string, payload ...[]byte) (string, error) {
+	sentDir := filepath.Join(partner.ProgressPath, "sent")
+	if err := os.MkdirAll(sentDir, 0700); err != nil {
+		return "", err
 	}
-	err = os.Remove(fsutil.PathHelper(filePath))
+	archiveDir, err := os.MkdirTemp(sentDir, time.Now().UTC().Format("20060102T150405Z")+"-*")
 	if err != nil {
-		return fmt.Errorf("failed to remove file: %w", err)
+		return "", err
 	}
+	originalDir := filepath.Join(archiveDir, "original")
+	if err := os.Mkdir(originalDir, 0700); err != nil {
+		return "", err
+	}
+	// A normal FileAct companion and its Body are separate files. Preserve
+	// the validated body bytes as well, without deleting a possibly shared
+	// input payload that another companion still references.
+	if len(payload) != 0 {
+		if err := fsutil.AtomicWriteFile(filepath.Join(archiveDir, "payload.bin"), payload[0], 0600); err != nil {
+			return "", err
+		}
+	}
+	receipt, err := json.MarshalIndent(map[string]any{
+		"state": "submitted", "reference": reference, "partner": partner.Name,
+		"file": filepath.Base(filePath), "time": time.Now().UTC().Format(time.RFC3339),
+	}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	// Record remote acceptance before moving the source. If either write or
+	// move fails, the source stays held in progress rather than being retried.
+	if err := fsutil.AtomicWriteFile(filepath.Join(archiveDir, "receipt.json"), receipt, 0600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(fsutil.PathHelper(filePath), filepath.Join(originalDir, filepath.Base(filePath))); err != nil {
+		return "", err
+	}
+	return archiveDir, nil
+}
+
+func completeOutgoing(filePath string, partner *config.Partner, reference string, logCh chan<- logging.LogData, payload ...[]byte) error {
+	archive, err := archiveSentFile(filePath, partner, reference, payload...)
+	if err != nil {
+		return routeSendFailure(filePath, partner, uncertainSend("accepted submission "+reference, fmt.Errorf("archiving original: %w", err)))
+	}
+	logging.Easylog(logCh, "INFO", "Message submitted successfully. Reference: "+reference+"; original archived: "+archive)
 	return nil
 }
 
-func processMXFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
-	//MX 데이터 생성
-	mxdata, err := MXDataMaker(filePath, logCh)
+func processFileActFile(settings *config.Settings, filePath string, partner *config.Partner, token *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
+	data, err := FileActDataMaker(filePath, partner, logCh)
 	if err != nil {
-		ferr := ErrorMessageRouter(filePath, partner)
-		if ferr != nil {
-			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
-		}
-		return fmt.Errorf("failed to create MX data: %w", err)
+		return routeSendFailure(filePath, partner, fmt.Errorf("creating FileAct data: %w", err))
 	}
-
-	//send
-	response, err := MXSender(mxdata, tokenData, settings, logCh, isPDE)
+	payload, err := loadFileActPayload(data, filePath, partner)
 	if err != nil {
-		ferr := ErrorMessageRouter(filePath, partner)
-		if ferr != nil {
-			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
-		}
-		return fmt.Errorf("failed to send MX message: %w", err)
+		return routeSendFailure(filePath, partner, err)
 	}
-
-	//완료
-	if isPDE {
-		logging.Easylog(logCh, "WARN", "MX message sent successfully with PDE. Response: "+response)
-	} else {
-		logging.Easylog(logCh, "INFO", "MX message sent successfully. Response: "+response)
-	}
-	err = os.Remove(fsutil.PathHelper(filePath))
+	reference, err := FileActSender(data, filePath, token, partner, settings, logCh, isPDE)
 	if err != nil {
-		return fmt.Errorf("failed to remove file: %w", err)
+		return routeSendFailure(filePath, partner, err)
 	}
-	return nil
+	return completeOutgoing(filePath, partner, reference, logCh, payload)
 }
 
-func processMTFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
-	//MT 데이터 생성
-	mtdata, err := MTDataMaker(filePath, logCh)
+func processMXFile(settings *config.Settings, filePath string, partner *config.Partner, token *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
+	data, err := MXDataMaker(filePath, logCh)
 	if err != nil {
-		ferr := ErrorMessageRouter(filePath, partner)
-		if ferr != nil {
-			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
-		}
-		return fmt.Errorf("failed to create MT data: %w", err)
+		return routeSendFailure(filePath, partner, fmt.Errorf("creating MX data: %w", err))
 	}
-
-	//send
-	response, err := MTSender(mtdata, tokenData, settings, logCh, isPDE)
+	reference, err := MXSender(data, token, settings, logCh, isPDE)
 	if err != nil {
-		ferr := ErrorMessageRouter(filePath, partner)
-		if ferr != nil {
-			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
-		}
-		return fmt.Errorf("failed to send MT message: %w", err)
+		return routeSendFailure(filePath, partner, err)
 	}
-
-	//완료
-	if isPDE {
-		logging.Easylog(logCh, "WARN", "MT message sent successfully with PDE. Response: "+response)
-	} else {
-		logging.Easylog(logCh, "INFO", "MT message sent successfully. Response: "+response)
-	}
-	err = os.Remove(fsutil.PathHelper(filePath))
-	if err != nil {
-		return fmt.Errorf("failed to remove file: %w", err)
-	}
-	return nil
+	return completeOutgoing(filePath, partner, reference, logCh)
 }
-func processDFAFile(settings *config.Settings, filePath string, partner *config.Partner, tokenData *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
-	//DFA 데이터 생성
-	fadata, err := DFADataMaker(filePath, partner, logCh)
+
+func processMTFile(settings *config.Settings, filePath string, partner *config.Partner, token *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
+	data, err := MTDataMaker(filePath, logCh)
 	if err != nil {
-		ferr := ErrorMessageRouter(filePath, partner)
-		if ferr != nil {
-			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
-		}
-		return fmt.Errorf("failed to create DFA data: %w", err)
+		return routeSendFailure(filePath, partner, fmt.Errorf("creating MT data: %w", err))
 	}
-	//logging.Easylog(logCh, "INFO", fmt.Sprintf("fadata: %+v", fadata))
-
-	//send
-	response, err := FileActSender(fadata, filePath, tokenData, partner, settings, logCh, isPDE)
+	reference, err := MTSender(data, token, settings, logCh, isPDE)
 	if err != nil {
-		ferr := ErrorMessageRouter(filePath, partner)
-		if ferr != nil {
-			err = fmt.Errorf("%s; %s", err.Error(), ferr.Error())
-		}
-		return fmt.Errorf("failed to send FileAct message: %w", err)
+		return routeSendFailure(filePath, partner, err)
 	}
-	//logging.Easylog(logCh, "INFO", fmt.Sprintf("fadata: %+v", fadata))
+	return completeOutgoing(filePath, partner, reference, logCh)
+}
 
-	//다했으면 파일 지우기(Body)
-	err = os.Remove(fsutil.PathHelper(filePath))
+func processDFAFile(settings *config.Settings, filePath string, partner *config.Partner, token *auth.TokenData, logCh chan<- logging.LogData, isPDE bool) error {
+	data, err := DFADataMaker(filePath, partner, logCh)
 	if err != nil {
-		return fmt.Errorf("failed to delete file: %w", err)
+		return routeSendFailure(filePath, partner, fmt.Errorf("creating DFA data: %w", err))
 	}
-
-	//완료
-	if isPDE {
-		logging.Easylog(logCh, "WARN", "DFA file transfer completed successfully with PDE. Response: "+response)
-	} else {
-		logging.Easylog(logCh, "INFO", "DFA file transfer completed successfully. Response: "+response)
+	reference, err := FileActSender(data, filePath, token, partner, settings, logCh, isPDE)
+	if err != nil {
+		return routeSendFailure(filePath, partner, err)
 	}
-
-	return nil
+	return completeOutgoing(filePath, partner, reference, logCh)
 }

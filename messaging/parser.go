@@ -26,12 +26,16 @@ func MTParser(payload string) (MT, error) {
 				mt.Line[len(mt.Line)-1].Data += "\n" + line
 				continue
 			}
+			return MT{}, fmt.Errorf("MT payload must start with a tagged field")
 		}
 
 		mt.Line = append(mt.Line, Field{
 			Field: field,
 			Data:  data,
 		})
+	}
+	if len(mt.Line) == 0 {
+		return MT{}, fmt.Errorf("MT payload has no fields")
 	}
 
 	return mt, nil
@@ -63,8 +67,13 @@ func MXParser(payload string) (MX, error) {
 	if err != nil {
 		return MX{}, fmt.Errorf("error parsing body XML: %w", err)
 	}
-	mx.AppHeader = xmlquery.FindOne(bodyDoc, "//*[local-name()='AppHdr']").OutputXML(true)
-	mx.Document = xmlquery.FindOne(bodyDoc, "//*[local-name()='Document']").OutputXML(true)
+	appHeader := xmlquery.FindOne(bodyDoc, "//*[local-name()='AppHdr']")
+	document := xmlquery.FindOne(bodyDoc, "//*[local-name()='Document']")
+	if appHeader == nil || document == nil {
+		return MX{}, fmt.Errorf("MX payload requires AppHdr and Document elements")
+	}
+	mx.AppHeader = appHeader.OutputXML(true)
+	mx.Document = document.OutputXML(true)
 
 	mx.AppHeader, err = fsutil.FormatXMLString(mx.AppHeader)
 	if err != nil {

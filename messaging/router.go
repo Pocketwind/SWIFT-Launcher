@@ -3,6 +3,7 @@ package messaging
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 
 	"github.com/Pocketwind/SWIFT-Launcher/config"
@@ -68,7 +69,19 @@ func MTRouter(route config.Route, message MTMessage) bool {
 }
 
 func ErrorMessageRouter(filePath string, partner *config.Partner) error {
-	err := os.Rename(fsutil.PathHelper(filePath), fsutil.PathHelper(partner.ErrorPath+"/"+fsutil.GetFileName(filePath)))
+	if partner.ErrorPath == "" {
+		return fmt.Errorf("error directory is not configured; original retained in progress")
+	}
+	if err := os.MkdirAll(partner.ErrorPath, 0700); err != nil {
+		return fmt.Errorf("creating error directory: %w", err)
+	}
+	// Use a unique attempt directory so an earlier failed original survives
+	// when another input arrives with the same filename.
+	dir, err := os.MkdirTemp(partner.ErrorPath, "failed-*")
+	if err != nil {
+		return fmt.Errorf("creating error archive: %w", err)
+	}
+	err = os.Rename(fsutil.PathHelper(filePath), filepath.Join(dir, fsutil.GetFileName(filePath)))
 	if err != nil {
 		return fmt.Errorf("failed to move file to error directory: %w", err)
 	}

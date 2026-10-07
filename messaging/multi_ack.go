@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 
@@ -14,10 +13,16 @@ import (
 )
 
 func MultiAck(settings *config.Settings, tokenData *auth.TokenData, ids []string, logCh chan<- logging.LogData) error {
+	if len(ids) == 0 {
+		return nil
+	}
 	//Auth
-	auth.Auth(settings, tokenData, logCh)
+	if err := auth.Auth(settings, tokenData, logCh); err != nil {
+		return fmt.Errorf("authenticate ACK: %w", err)
+	}
 	tokenData.RLock()
 	accessToken := tokenData.AccessToken
+	tokenType := tokenData.TokenType
 	tokenData.RUnlock()
 	//URL
 	ackUrl := settings.Messaging.DistributionUrl
@@ -33,6 +38,9 @@ func MultiAck(settings *config.Settings, tokenData *auth.TokenData, ids []string
 		if err != nil {
 			return fmt.Errorf("invalid id %q: %w", id, err)
 		}
+		if parsedID <= 0 {
+			return fmt.Errorf("invalid distribution ID %d", parsedID)
+		}
 		ackList = append(ackList, ackItem{ID: parsedID, Status: "Ack"})
 	}
 
@@ -47,10 +55,13 @@ func MultiAck(settings *config.Settings, tokenData *auth.TokenData, ids []string
 	}
 
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+	req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
 	req.Header.Set("Content-Type", "application/json")
 
 	client := settings.Messaging.HttpClient
+	if client == nil {
+		return fmt.Errorf("messaging HTTP client is not configured")
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -59,10 +70,9 @@ func MultiAck(settings *config.Settings, tokenData *auth.TokenData, ids []string
 	defer resp.Body.Close()
 
 	//200이 OK, 나머지는 에러
-	if resp.StatusCode != 200 {
-		errorBody, _ := io.ReadAll(resp.Body)
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ack messages. Status: %d, Response: %s", resp.StatusCode, string(errorBody)))
-		return fmt.Errorf("failed to ack messages. Status: %d, Response: %s", resp.StatusCode, string(errorBody))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ack messages. HTTP status: %d", resp.StatusCode))
+		return fmt.Errorf("failed to ack messages: HTTP %d", resp.StatusCode)
 	} else {
 		logging.Easylog(logCh, "INFO", fmt.Sprintf("Acked %d messages", len(ids)))
 	}

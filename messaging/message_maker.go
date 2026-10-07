@@ -12,6 +12,15 @@ import (
 )
 
 func FINMessageMaker(messages MTDownload) (string, error) {
+	messageType, ok := strings.CutPrefix(messages.Message.MessageType, "fin.")
+	if !ok || len(messageType) != 3 || strings.ContainsAny(messageType, ".{}") {
+		return "", fmt.Errorf("invalid FIN message type %q", messages.Message.MessageType)
+	}
+	for _, digit := range messageType {
+		if digit < '0' || digit > '9' {
+			return "", fmt.Errorf("invalid FIN message type %q", messages.Message.MessageType)
+		}
+	}
 	var stringBuilder strings.Builder
 
 	//Start of the block 1
@@ -36,7 +45,7 @@ func FINMessageMaker(messages MTDownload) (string, error) {
 		stringBuilder.WriteString("I")
 	}
 	//Message Type
-	stringBuilder.WriteString(strings.Split(messages.Message.MessageType, ".")[1])
+	stringBuilder.WriteString(messageType)
 	//Receiver
 	stringBuilder.WriteString(messages.Message.Receiver)
 	//Priority (System, Urgent, Normal)
@@ -62,6 +71,16 @@ func FINMessageMaker(messages MTDownload) (string, error) {
 
 func MXMessageMaker(message MXDownload) (string, error) {
 	var MXHeaderData MXHeader
+	senderX1, err := mxDNBIC8(message.Message.Requestor)
+	if err != nil {
+		return "", fmt.Errorf("invalid MX requestor: %w", err)
+	}
+	senderX2 := "XXX"
+	receiverX1, err := mxDNBIC8(message.Message.Responder)
+	if err != nil {
+		return "", fmt.Errorf("invalid MX responder: %w", err)
+	}
+	receiverX2 := "XXX"
 
 	//Header (Message태그)
 	//Sender Reference
@@ -79,15 +98,13 @@ func MXMessageMaker(message MXDownload) (string, error) {
 	//Sender DN
 	MXHeaderData.SenderDN = message.Message.Requestor
 	//Sender FullName X1, X2
-	sender := strings.Split(message.Message.Requestor, ",")
-	MXHeaderData.SenderFullNameX2 = strings.Split(sender[0], "=")[1]
-	MXHeaderData.SenderFullNameX1 = strings.ToUpper(strings.Split(sender[1], "=")[1] + MXHeaderData.SenderFullNameX2)
+	MXHeaderData.SenderFullNameX2 = senderX2
+	MXHeaderData.SenderFullNameX1 = senderX1
 	//Receiver DN
 	MXHeaderData.ReceiverDN = message.Message.Responder
 	//Receiver FullName X1, X2
-	receiver := strings.Split(message.Message.Responder, ",")
-	MXHeaderData.ReceiverFullNameX2 = strings.Split(receiver[0], "=")[1]
-	MXHeaderData.ReceiverFullNameX1 = strings.ToUpper(strings.Split(receiver[1], "=")[1] + MXHeaderData.ReceiverFullNameX2)
+	MXHeaderData.ReceiverFullNameX2 = receiverX2
+	MXHeaderData.ReceiverFullNameX1 = receiverX1
 	//InterfaceInfo Create, Context, Nature
 	MXHeaderData.InterfaceInfoCreator = "Messenger"
 	MXHeaderData.InterfaceInfoContext = "Original"
@@ -99,7 +116,7 @@ func MXMessageMaker(message MXDownload) (string, error) {
 	//Service
 	MXHeaderData.NetworkInfoService = message.Message.ServiceCode
 	//Request Type
-	MXHeaderData.NetworkInfoSWIFTNetType = message.Message.Format
+	MXHeaderData.NetworkInfoSWIFTNetType = message.Message.MessageType
 	MXHeaderData.NetworkInfoSWIFTNetSubtype = message.Message.UsageIdentifier
 
 	//Header XML 생성
@@ -125,7 +142,11 @@ func MXMessageMaker(message MXDownload) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error parsing body XML: %w", err)
 	}
-	bodyNode := xmlquery.FindOne(bodyDoc, "//*[local-name()='Envelope']").OutputXML(false)
+	envelope := xmlquery.FindOne(bodyDoc, "//*[local-name()='Envelope']")
+	if envelope == nil {
+		return "", fmt.Errorf("MX payload is missing Envelope element")
+	}
+	bodyNode := envelope.OutputXML(false)
 
 	//MX 생성
 	var stringBuilder strings.Builder
@@ -170,11 +191,13 @@ func FINReportMaker(report MTReport) (string, error) {
 	switch report.TransmissionReport.DeliveryStatus {
 	case "Acked":
 		reportBuilder.WriteString("0}")
-	case "Rejected":
+	case "Rejected", "Nacked":
 		reportBuilder.WriteString("1}")
 		reportBuilder.WriteString("{405:")
 		reportBuilder.WriteString(report.TransmissionReport.RejectionCode)
 		reportBuilder.WriteString("}")
+	default:
+		return "", fmt.Errorf("unsupported FIN delivery status %q", report.TransmissionReport.DeliveryStatus)
 	}
 	//108 block
 	reportBuilder.WriteString("{108:")
@@ -187,12 +210,22 @@ func FINReportMaker(report MTReport) (string, error) {
 }
 
 func MXReportMaker(report MXReport) (string, error) {
+	senderX1, err := mxDNBIC8(report.TransmissionReport.Message.Requestor)
+	if err != nil {
+		return "", fmt.Errorf("invalid MX requestor: %w", err)
+	}
+	senderX2 := "XXX"
+	receiverX1, err := mxDNBIC8(report.TransmissionReport.Message.Responder)
+	if err != nil {
+		return "", fmt.Errorf("invalid MX responder: %w", err)
+	}
+	receiverX2 := "XXX"
 	//Header
 	var MXReportHeaderData MXReportHeader
 	MXReportHeaderData.SenderReference = report.TransmissionReport.SenderReference
 	MXReportHeaderData.NetworkDeliveryStatus = report.TransmissionReport.DeliveryStatus
-	MXReportHeaderData.OriginalInstanceAddresseeX2 = strings.Split(strings.Split(report.TransmissionReport.Message.Requestor, ",")[0], "=")[1]
-	MXReportHeaderData.OriginalInstanceAddresseeX1 = strings.ToUpper(strings.Split(strings.Split(report.TransmissionReport.Message.Requestor, ",")[1], "=")[1] + MXReportHeaderData.OriginalInstanceAddresseeX2)
+	MXReportHeaderData.OriginalInstanceAddresseeX2 = senderX2
+	MXReportHeaderData.OriginalInstanceAddresseeX1 = senderX1
 	MXReportHeaderData.ReportingApplication = "SWIFTNetInterface"
 	MXReportHeaderData.Priority = report.TransmissionReport.NetworkInfo.MessageNetworkPriority
 	MXReportHeaderData.IsPossibleDuplicate = report.TransmissionReport.NetworkInfo.MessagePossibleDuplicate
@@ -232,8 +265,8 @@ func MXReportMaker(report MXReport) (string, error) {
 	MXReportHeaderData.Message.SenderFullNameX1 = MXReportHeaderData.OriginalInstanceAddresseeX1
 	MXReportHeaderData.Message.SenderFullNameX2 = MXReportHeaderData.OriginalInstanceAddresseeX2
 	MXReportHeaderData.Message.ReceiverDN = report.TransmissionReport.Message.Responder
-	MXReportHeaderData.Message.ReceiverFullNameX1 = strings.ToUpper(strings.Split(strings.Split(report.TransmissionReport.Message.Responder, ",")[1], "=")[1] + strings.Split(strings.Split(report.TransmissionReport.Message.Responder, ",")[0], "=")[1])
-	MXReportHeaderData.Message.ReceiverFullNameX2 = strings.Split(strings.Split(report.TransmissionReport.Message.Responder, ",")[0], "=")[1]
+	MXReportHeaderData.Message.ReceiverFullNameX1 = receiverX1
+	MXReportHeaderData.Message.ReceiverFullNameX2 = receiverX2
 	MXReportHeaderData.Message.InterfaceInfoCreator = "ApplicationInterface"
 	MXReportHeaderData.Message.InterfaceInfoContext = "Report"
 	MXReportHeaderData.Message.InterfaceInfoNature = "Financial"
@@ -268,7 +301,11 @@ func MXReportMaker(report MXReport) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error parsing body XML: %w", err)
 	}
-	bodyNode := xmlquery.FindOne(bodyDoc, "//*[local-name()='Envelope']").OutputXML(false)
+	envelope := xmlquery.FindOne(bodyDoc, "//*[local-name()='Envelope']")
+	if envelope == nil {
+		return "", fmt.Errorf("MX payload is missing Envelope element")
+	}
+	bodyNode := envelope.OutputXML(false)
 
 	//합치기
 	finalReport := "<DataPDU><Revision>2.0.10</Revision>\n" + string(headerBytes) + "\n" + "<Body>" + bodyNode + "</Body></DataPDU>"
@@ -277,4 +314,19 @@ func MXReportMaker(report MXReport) (string, error) {
 		return "", err
 	}
 	return formattedReport, nil
+}
+
+func mxDNBIC8(dn string) (string, error) {
+	for _, part := range strings.Split(dn, ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "o") {
+			continue
+		}
+		bic := strings.ToUpper(strings.TrimSpace(value))
+		if len(bic) != 8 {
+			return "", fmt.Errorf("DN organization must contain an 8-character BIC")
+		}
+		return bic, nil
+	}
+	return "", fmt.Errorf("DN is missing an o component")
 }

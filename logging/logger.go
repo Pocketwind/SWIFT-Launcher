@@ -2,34 +2,57 @@ package logging
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
 
 func Logger(exitCh <-chan bool, logCh <-chan LogData) {
-	//로그 로테이션 검사
-	//로그 파일 생성
-	logFile, err := os.OpenFile("app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Printf("Error opening log file: %v\n", err)
-		return
-	}
-	defer logFile.Close()
-
-	//로그파일 크기 넘으면 로테이션
-	const maxLogSize = 10 * 1024 * 1024 // 10MB
-	info, err := logFile.Stat()
-	if err == nil && info.Size() > maxLogSize {
-		logFile.Close()
-		os.Rename("app.log", fmt.Sprintf("app.log.%s", time.Now().Format("20060102150405")))
-		logFile, err = os.OpenFile("app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	const maxLogSize = 10 * 1024 * 1024
+	var logFile *os.File
+	var logSize int64
+	open := func() {
+		var err error
+		logFile, err = os.OpenFile("app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
-			fmt.Printf("Error opening log file: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Cannot open app.log; logging to stderr: %v\n", err)
 			return
+		}
+		if info, err := logFile.Stat(); err == nil {
+			logSize = info.Size()
+		}
+	}
+	open()
+	defer func() {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+	}()
+	write := func(data LogData) {
+		if logFile != nil && logSize >= maxLogSize {
+			_ = logFile.Close()
+			logFile = nil
+			if err := os.Rename("app.log", "app.log."+time.Now().Format("20060102150405.000000000")); err != nil {
+				fmt.Fprintf(os.Stderr, "Cannot rotate app.log: %v\n", err)
+			}
+			logSize = 0
+			open()
+		}
+		var destination io.Writer = os.Stderr
+		if logFile != nil {
+			destination = logFile
+		}
+		line := fmt.Sprintf("%s | %s | %s\n", timeFormat(data.Time), data.Type, data.Text)
+		n, err := io.WriteString(destination, line)
+		logSize += int64(n)
+		if err != nil && logFile != nil {
+			fmt.Fprintf(os.Stderr, "Cannot write app.log; logging to stderr: %v\n%s", err, line)
+			_ = logFile.Close()
+			logFile = nil
 		}
 	}
 
-	writer(logFile, LogData{
+	write(LogData{
 		Time: time.Now().UnixMilli(),
 		Type: "INFO",
 		Text: "Logger started",
@@ -43,14 +66,14 @@ func Logger(exitCh <-chan bool, logCh <-chan LogData) {
 	for {
 		select {
 		case <-exit:
-			writer(logFile, LogData{Time: time.Now().UnixMilli(), Type: "INFO", Text: "Shutdown requested"})
+			write(LogData{Time: time.Now().UnixMilli(), Type: "INFO", Text: "Shutdown requested"})
 			exit = nil
 		case logData, ok := <-logCh:
 			if !ok {
-				writer(logFile, LogData{Time: time.Now().UnixMilli(), Type: "INFO", Text: "Logger stopped"})
+				write(LogData{Time: time.Now().UnixMilli(), Type: "INFO", Text: "Logger stopped"})
 				return
 			}
-			writer(logFile, logData)
+			write(logData)
 		}
 	}
 }
@@ -62,12 +85,6 @@ func Easylog(logCh chan<- LogData, logType string, logText string) {
 		Text: logText,
 	}
 	logCh <- logData
-}
-
-func writer(logFile *os.File, logData LogData) {
-	timeString := timeFormat(logData.Time)
-	logString := fmt.Sprintf("%s | %s | %s\n", timeString, logData.Type, logData.Text)
-	logFile.WriteString(logString)
 }
 
 func timeFormat(millis int64) string {

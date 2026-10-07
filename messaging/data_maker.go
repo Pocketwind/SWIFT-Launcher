@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -85,7 +86,14 @@ func MXDataMaker(path string, logCh chan<- logging.LogData) (MXData, error) {
 	mxdata.SenderReference = fsutil.SafeInnerText(xmlquery.FindOne(doc, "//*[local-name()='SenderReference']"))
 	mxdata.ServiceCode = fsutil.SafeInnerText(xmlquery.FindOne(doc, "//*[local-name()='NetworkInfo']/*[local-name()='Service']"))
 	mxdata.Format = "MX"
-	mxdata.Payload = xmlquery.FindOne(doc, "//*[local-name()='Body']").OutputXML(false)
+	body := xmlquery.FindOne(doc, "//*[local-name()='Body']")
+	if body == nil {
+		return MXData{}, fmt.Errorf("MX message missing Body")
+	}
+	if mxdata.MessageType == "" || mxdata.Requestor == "" || mxdata.Responder == "" || mxdata.SenderReference == "" || mxdata.ServiceCode == "" {
+		return MXData{}, fmt.Errorf("MX message missing required routing or reference fields")
+	}
+	mxdata.Payload = body.OutputXML(false)
 	mxdata.Payload = "<envelope:Envelope xmlns:envelope=\"urn:swift:xsd:envelope\">" + mxdata.Payload + "</envelope:Envelope>"
 
 	//fmt.Printf("Parsed MXData: %+v\n", mxdata)
@@ -156,9 +164,7 @@ func FileActDataMaker(path string, partner *config.Partner, logCh chan<- logging
 	fadata.FileTransferRequest.FileAttributes.FileName = fileLogicalName
 	fadata.FileTransferRequest.FileOperation.Type = "upload"
 	fadata.FileTransferRequest.EncryptionAttributes.KeyAlg = "AES256"
-	fadata.FileTransferRequest.EncryptionAttributes.KeyValue = "01234567890123456789012345678901" //임의의 32글자 키
 	fadata.FileTransferRequest.EncryptionAttributes.KeyDigestAlg = "MD5"
-	fadata.FileTransferRequest.EncryptionAttributes.KeyDigest = "sQqNsWTgdUEFt6mb5y4/5Q=="
 
 	//bodypath
 	body = fsutil.PathHelper(partner.InputPath + "/" + fsutil.GetFileName(body))
@@ -187,9 +193,12 @@ func FileActDataMaker(path string, partner *config.Partner, logCh chan<- logging
 	md5HashB64 := base64.StdEncoding.EncodeToString(md5Hash[:])
 
 	//encryption key 임의 설정 32글자
-	encKey := "01234567890123456789012345678901"
-	encKeyB64 := base64.StdEncoding.EncodeToString([]byte(encKey))
-	encKeyMD5 := md5.Sum([]byte(encKey))
+	encKey := make([]byte, 32)
+	if _, err := rand.Read(encKey); err != nil {
+		return FAData{}, fmt.Errorf("generate encryption key: %w", err)
+	}
+	encKeyB64 := base64.StdEncoding.EncodeToString(encKey)
+	encKeyMD5 := md5.Sum(encKey)
 
 	//나머지 fadata채우기
 	fadata.FileTransferRequest.FileAttributes.FileSize = filesize
@@ -231,9 +240,12 @@ func DFADataMaker(filePath string, partner *config.Partner, logCh chan<- logging
 	md5HashB64 := base64.StdEncoding.EncodeToString(md5Hash[:])
 
 	//encryption key 임의 설정 32글자
-	encKey := "01234567890123456789012345678901"
-	encKeyB64 := base64.StdEncoding.EncodeToString([]byte(encKey))
-	encKeyMD5 := md5.Sum([]byte(encKey))
+	encKey := make([]byte, 32)
+	if _, err := rand.Read(encKey); err != nil {
+		return FAData{}, fmt.Errorf("generate encryption key: %w", err)
+	}
+	encKeyB64 := base64.StdEncoding.EncodeToString(encKey)
+	encKeyMD5 := md5.Sum(encKey)
 
 	fadata.FileTransferRequest.FileAttributes.FileName = filename
 	fadata.FileTransferRequest.FileAttributes.FileSize = filesize

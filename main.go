@@ -52,7 +52,7 @@ func main() {
 		case "status":
 			type runtimeStatus struct {
 				UptimeSeconds int64               `json:"uptime_seconds"`
-				AccessToken   string              `json:"access_token"`
+				TokenReady    bool                `json:"token_ready"`
 				Partners      []config.StatusData `json:"partners"`
 			}
 
@@ -86,11 +86,7 @@ func main() {
 			}
 			fmt.Println("---------- Runtime Status ----------")
 			fmt.Printf("Uptime       : %d seconds\n", rt.UptimeSeconds)
-			if rt.AccessToken == "" {
-				fmt.Println("Access Token : (not obtained)")
-			} else {
-				fmt.Printf("Access Token : %s\n", rt.AccessToken)
-			}
+			fmt.Printf("Token ready  : %t\n", rt.TokenReady)
 			fmt.Printf("Partners     : %d\n", len(rt.Partners))
 			for _, partner := range rt.Partners {
 				fmt.Printf("  - %s (%s) : %t - %s\n", partner.Name, partner.Direction, partner.Status, partner.Route)
@@ -258,6 +254,7 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 	agent, err := useragent.BuildUserAgent(agentConfig, "Go")
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error building User-Agent: %v", err))
+		shutdownEarly("Startup aborted: invalid User-Agent configuration")
 		return
 	}
 	fmt.Printf("User-Agent: %s\n\n", agent)
@@ -327,12 +324,17 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 		if err != nil {
 			logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to ensure output directory: %v", err))
 			fmt.Printf("ERROR: Failed to ensure output directory: %v\n", err)
+			shutdownEarly("Startup aborted: failed to ensure output directory")
 			return
 		}
 	}
 
 	//토큰 먼저 발급받고 실행
-	auth.Auth(settings, tokenData, logCh)
+	if err := auth.Auth(settings, tokenData, logCh); err != nil {
+		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Startup authentication failed: %v", err))
+		shutdownEarly("Startup aborted: authentication failed")
+		return
+	}
 	//Worker 등록 및 shutdown 함수 생성
 	startTokenService(&wg, settings, tokenData, logCh, exitCmd)
 	shutdown := createShutdown(stopAll, &wg, &shutdownOnce, tokenData, settings, logCh, doneLogger)
@@ -383,16 +385,33 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 		return
 	}
 
-	go func() {
-		<-sigCh
-		os.Exit(0)
-	}()
-
-	//main (interactive)
+	// Wait for signals independently of console input and drain workers on exit.
 	reader := bufio.NewReader(os.Stdin)
+	readRequests, inputs, readerDone := startConsoleReader(reader, exitCmd)
 	for {
 		fmt.Print("Input: ")
-		input, _ := reader.ReadString('\n')
+		select {
+		case readRequests <- struct{}{}:
+		case <-readerDone:
+			shutdown("Console input closed. Exiting application...")
+			return
+		case <-sigCh:
+			shutdown("Stop signal detected. Exiting application...")
+			return
+		}
+		var input string
+		select {
+		case <-sigCh:
+			shutdown("Stop signal detected. Exiting application...")
+			return
+		case value, ok := <-inputs:
+			if !ok {
+				shutdown("Console input closed. Exiting application...")
+				return
+			}
+			input = value
+		}
+
 		input = strings.TrimSpace(input)
 		switch input {
 		case "exit":
@@ -401,20 +420,66 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 		case "info":
 			tokenData.RLock()
 			msgPurpose := tokenData.TokenPurpose
-			msgAccessToken := tokenData.AccessToken
+			tokenReady := tokenData.AccessToken != "" && time.Now().Unix() < tokenData.ExpireTime
 			tokenData.RUnlock()
 
 			fmt.Println("----------------------------------------------")
-			fmt.Printf("%s Token: %s\n", msgPurpose, msgAccessToken)
+			fmt.Printf("%s Token ready: %t\n", msgPurpose, tokenReady)
 			fmt.Println("----------------------------------------------")
 		case "refresh":
-			//인증서 갱신
-			auth.GetCert(settings, tokenData, logCh)
+			ctx, cancel := context.WithCancel(context.Background())
+			refreshed := make(chan error, 1)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				refreshed <- auth.GetCertWithInputContext(ctx, settings, tokenData, logCh, reader)
+			}()
+			select {
+			case err := <-refreshed:
+				cancel()
+				if err != nil {
+					logging.Easylog(logCh, "ERROR", fmt.Sprintf("Certificate refresh failed: %v", err))
+				}
+			case <-sigCh:
+				cancel()
+				shutdown("Stop signal detected during certificate refresh. Exiting application...")
+				return
+			}
 		case "certinfo":
 			//인증서 정보 출력
 			auth.GetCertInfo(publicKey)
 		}
 	}
+}
+
+func startConsoleReader(reader *bufio.Reader, exitCmd <-chan bool) (chan<- struct{}, <-chan string, <-chan struct{}) {
+	requests := make(chan struct{})
+	inputs := make(chan string)
+	done := make(chan struct{})
+	go func() {
+		defer close(inputs)
+		defer close(done)
+		for {
+			// Commands such as refresh share this reader; do not pre-read their input.
+			select {
+			case <-requests:
+			case <-exitCmd:
+				return
+			}
+			input, err := reader.ReadString('\n')
+			if input != "" {
+				select {
+				case inputs <- input:
+				case <-exitCmd:
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return requests, inputs, done
 }
 
 func startTokenService(wg *sync.WaitGroup, settings *config.Settings, tokenData *auth.TokenData, logCh chan logging.LogData, exitCmd chan bool) {
@@ -430,22 +495,11 @@ func createShutdown(stopAll func(string), wg *sync.WaitGroup, shutdownOnce *sync
 		shutdownOnce.Do(func() {
 			stopAll(reason)
 
-			waitDone := make(chan struct{})
-			go func() {
-				wg.Wait()
-				close(waitDone)
-			}()
-
-			const shutdownWaitTimeout = 5 * time.Second
-			select {
-			case <-waitDone:
-				auth.RevokeToken(settings, tokenData, logCh)
-				close(logCh)
-				<-doneLogger
-			case <-time.After(shutdownWaitTimeout):
-				// lingering worker가 있으면 log 채널 close 시 panic 가능성이 있어 강제 대기만 중단한다.
-				logging.Easylog(logCh, "WARN", fmt.Sprintf("Shutdown wait timeout (%s). Some workers may still be stopping.", shutdownWaitTimeout))
-			}
+			// Keep the process alive until in-flight messages have been persisted.
+			wg.Wait()
+			auth.RevokeToken(settings, tokenData, logCh)
+			close(logCh)
+			<-doneLogger
 		})
 	}
 }
@@ -497,7 +551,7 @@ func startStatusService(wg *sync.WaitGroup, settings *config.Settings, tokenData
 		}
 
 		tokenData.RLock()
-		accessToken := tokenData.AccessToken
+		tokenReady := tokenData.AccessToken != "" && time.Now().Unix() < tokenData.ExpireTime
 		tokenData.RUnlock()
 
 		partnerList := make([]config.StatusData, 0, len(partners))
@@ -521,7 +575,7 @@ func startStatusService(wg *sync.WaitGroup, settings *config.Settings, tokenData
 
 		resp := map[string]any{
 			"uptime_seconds": int64(time.Since(startTime).Seconds()),
-			"access_token":   accessToken,
+			"token_ready":    tokenReady,
 			"partners":       partnerList,
 		}
 
@@ -547,12 +601,16 @@ func startStatusService(wg *sync.WaitGroup, settings *config.Settings, tokenData
 		logging.Easylog(logCh, "INFO", "Status service stopped")
 	}()
 
-	// exitCmd 감지 시 graceful shutdown
+	// Wait for HTTP shutdown before closing the logger.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		<-exitCmd
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_ = server.Shutdown(ctx)
+		if err := server.Shutdown(ctx); err != nil {
+			_ = server.Close()
+		}
 	}()
 }
 

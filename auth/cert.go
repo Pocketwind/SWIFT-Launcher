@@ -2,16 +2,19 @@ package auth
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Pocketwind/SWIFT-Launcher/config"
@@ -20,23 +23,55 @@ import (
 )
 
 func GetCert(settings *config.Settings, tokenData *TokenData, logCh chan<- logging.LogData) error {
-	var certRequest CertRequest
-	var filename string
+	return GetCertWithInput(settings, tokenData, logCh, bufio.NewReader(os.Stdin))
+}
 
-	//데이터 입력
-	reader := bufio.NewReader(os.Stdin)
+// GetCertWithInput shares the caller's console reader during certificate renewal.
+func GetCertWithInput(settings *config.Settings, tokenData *TokenData, logCh chan<- logging.LogData, reader *bufio.Reader) error {
+	return GetCertWithInputContext(context.Background(), settings, tokenData, logCh, reader)
+}
+
+// GetCertWithInputContext allows shutdown while a certificate prompt is waiting.
+// After cancellation the caller must not reuse reader: its blocked input read
+// finishes only when input arrives. Once sent, the HTTP request uses its normal
+// timeout so an issued certificate is not discarded because of shutdown.
+func GetCertWithInputContext(ctx context.Context, settings *config.Settings, tokenData *TokenData, logCh chan<- logging.LogData, reader *bufio.Reader) error {
+	if reader == nil {
+		return fmt.Errorf("certificate issuance requires console input")
+	}
+	return getCertContext(ctx, settings, tokenData, logCh, reader, "pem")
+}
+
+func getCert(settings *config.Settings, tokenData *TokenData, logCh chan<- logging.LogData, input io.Reader, certDir string) error {
+	return getCertContext(context.Background(), settings, tokenData, logCh, input, certDir)
+}
+
+func getCertContext(ctx context.Context, settings *config.Settings, tokenData *TokenData, logCh chan<- logging.LogData, input io.Reader, certDir string) error {
+	if ctx == nil || settings == nil || settings.Messaging.HttpClient == nil || input == nil {
+		return fmt.Errorf("certificate issuance requires settings, HTTP client and console input")
+	}
+	var certRequest CertRequest
+	reader, buffered := input.(*bufio.Reader)
+	if !buffered {
+		reader = bufio.NewReader(input)
+	}
 	fmt.Print("Reference Number: ")
-	input, _ := reader.ReadString('\n')
-	certRequest.ReferenceNumber = strings.TrimSpace(input)
+	line, err := readCertificateLine(ctx, reader)
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("read reference number: %w", err)
+	}
+	certRequest.ReferenceNumber = strings.TrimSpace(line)
 
 	fmt.Print("Authcode: ")
-	input, _ = reader.ReadString('\n')
-	certRequest.Authcode = strings.TrimSpace(input)
-
-	filename = "channel"
-
-	//키 및 CSR 생성
-	if err := os.MkdirAll("pem", 0755); err != nil {
+	line, err = readCertificateLine(ctx, reader)
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("read authcode: %w", err)
+	}
+	certRequest.Authcode = strings.TrimSpace(line)
+	if certRequest.ReferenceNumber == "" || certRequest.Authcode == "" {
+		return fmt.Errorf("reference number and authcode are required")
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
@@ -45,15 +80,7 @@ func GetCert(settings *config.Settings, tokenData *TokenData, logCh chan<- loggi
 		return fmt.Errorf("failed to generate private key: %w", err)
 	}
 
-	keyFile, err := os.Create("pem/" + filename + ".key")
-	if err != nil {
-		return fmt.Errorf("failed to create key file: %w", err)
-	}
-	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}); err != nil {
-		keyFile.Close()
-		return fmt.Errorf("failed to write key file: %w", err)
-	}
-	keyFile.Close()
+	privateKeyBytes := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
 
 	csrTemplate := &x509.CertificateRequest{
 		Subject: pkix.Name{
@@ -66,25 +93,12 @@ func GetCert(settings *config.Settings, tokenData *TokenData, logCh chan<- loggi
 		return fmt.Errorf("failed to create CSR: %w", err)
 	}
 
-	csrFile, err := os.Create("pem/" + filename + ".csr")
-	if err != nil {
-		return fmt.Errorf("failed to create CSR file: %w", err)
-	}
-	if err := pem.Encode(csrFile, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}); err != nil {
-		csrFile.Close()
-		return fmt.Errorf("failed to write CSR file: %w", err)
-	}
-	csrFile.Close()
+	csrBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
 	//고정값
 	certRequest.Action = "getServerCert"
 	certRequest.RetrievedAs = "rawDER"
 
-	//csr 읽기
-	csrBytes, err := os.ReadFile("pem/" + filename + ".csr")
-	if err != nil {
-		return err
-	}
 	certRequest.Pkcs10Request = string(csrBytes)
 
 	//인증서 요청
@@ -115,10 +129,14 @@ func GetCert(settings *config.Settings, tokenData *TokenData, logCh chan<- loggi
 		return fmt.Errorf("error response from server: %v", resp.Status)
 	}
 
-	responseBody, err := io.ReadAll(resp.Body)
+	const maxCertResponseSize = 1 << 20
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxCertResponseSize+1))
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error reading response: %v", err))
 		return err
+	}
+	if len(responseBody) > maxCertResponseSize {
+		return fmt.Errorf("certificate response too large")
 	}
 
 	//파싱
@@ -129,8 +147,7 @@ func GetCert(settings *config.Settings, tokenData *TokenData, logCh chan<- loggi
 	}
 	certNode := htmlquery.FindOne(doc, "//font")
 	if certNode == nil {
-		bodyPreview := strings.TrimSpace(string(responseBody))
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error finding certificate node. Response preview: %s", bodyPreview))
+		logging.Easylog(logCh, "ERROR", "Error finding certificate node in response")
 		return fmt.Errorf("error finding certificate node")
 	}
 	certData := htmlquery.InnerText(certNode)
@@ -140,46 +157,207 @@ func GetCert(settings *config.Settings, tokenData *TokenData, logCh chan<- loggi
 	certData = strings.ReplaceAll(certData, "\n\n", "\n")
 	certData = strings.ReplaceAll(certData, "    ", "")
 	certData = strings.TrimSpace(certData)
-	certData = strings.ReplaceAll(certData, "\n", "\r\n")
-	err = os.WriteFile("pem/"+filename+".cer", []byte(certData), 0644)
-	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error writing certificate file: %v", err))
-		return err
+	block, remaining := pem.Decode([]byte(certData))
+	if block == nil || block.Type != "CERTIFICATE" || len(strings.TrimSpace(string(remaining))) != 0 {
+		return fmt.Errorf("response does not contain a single PEM certificate")
 	}
-
-	//인증서 정보 교체
-	privateKeyBytes, err := os.ReadFile("pem/" + filename + ".key")
+	certificate, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error reading private key file: %v", err))
-		return err
+		return fmt.Errorf("parse issued certificate: %w", err)
 	}
-	publicKeyBytes, err := os.ReadFile("pem/" + filename + ".cer")
-	if err != nil {
-		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Error reading public key file: %v", err))
-		return err
+	publicKey, ok := certificate.PublicKey.(*rsa.PublicKey)
+	if !ok || publicKey.E != privateKey.PublicKey.E || publicKey.N.Cmp(privateKey.PublicKey.N) != 0 {
+		return fmt.Errorf("issued certificate does not match the new private key")
 	}
-	settings.Messaging.Subject, err = GetCertDN(certData)
+	publicKeyBytes := pem.EncodeToMemory(block)
+	subject, err := GetCertDN(certData)
 	if err != nil {
 		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to extract DN from certificate: %v", err))
 		return err
+	}
+	if tokenData != nil {
+		tokenData.authMu.Lock()
+	}
+	if err := installCertificatePair(certDir, privateKeyBytes, publicKeyBytes, os.Rename); err != nil {
+		if tokenData != nil {
+			tokenData.authMu.Unlock()
+		}
+		return fmt.Errorf("install certificate and private key: %w", err)
 	}
 
 	//nil 받을때(초기실행) 구분
 	if tokenData != nil {
 		tokenData.Lock()
-		tokenData.Subject = settings.Messaging.Subject
+		tokenData.Subject = subject
 		tokenData.PublicKey = string(publicKeyBytes)
 		tokenData.PrivateKey = string(privateKeyBytes)
 		tokenData.Unlock()
+		tokenData.authMu.Unlock()
+	} else {
+		settings.Messaging.Subject = subject
+	}
+	// The CSR is diagnostic; its failure does not invalidate the installed pair.
+	if err := os.WriteFile(filepath.Join(certDir, "channel.csr"), csrBytes, 0644); err != nil {
+		logging.Easylog(logCh, "WARN", fmt.Sprintf("Certificate installed, but CSR could not be saved: %v", err))
 	}
 
 	//완료
-	logging.Easylog(logCh, "INFO", fmt.Sprintf("Certificate saved successfully: pem/%s.cer", filename))
+	certPath := filepath.Join(certDir, "channel.cer")
+	logging.Easylog(logCh, "INFO", fmt.Sprintf("Certificate saved successfully: %s", certPath))
 	fmt.Println("------------------------------------------")
-	fmt.Printf("Certificate saved successfully: pem/%s.cer\n", filename)
+	fmt.Printf("Certificate saved successfully: %s\n", certPath)
 	fmt.Println("------------------------------------------")
 
 	return nil
+}
+
+func readCertificateLine(ctx context.Context, reader *bufio.Reader) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if ctx.Done() == nil {
+		return reader.ReadString('\n')
+	}
+	type inputResult struct {
+		line string
+		err  error
+	}
+	result := make(chan inputResult, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		result <- inputResult{line: line, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case read := <-result:
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return read.line, read.err
+	}
+}
+
+// installCertificatePair stages both files before moving the old pair aside.
+// Rename failures restore the old pair; a process crash between file renames
+// still requires recovery from the backup files.
+func installCertificatePair(dir string, key, certificate []byte, rename func(string, string) error) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	type installation struct {
+		path, temporary, backup string
+		backedUp, installed     bool
+	}
+	files := []*installation{
+		{path: filepath.Join(dir, "channel.key")},
+		{path: filepath.Join(dir, "channel.cer")},
+	}
+	defer func() {
+		for _, file := range files {
+			if file.temporary != "" {
+				os.Remove(file.temporary)
+			}
+		}
+	}()
+	for i, data := range [][]byte{key, certificate} {
+		mode := os.FileMode(0644)
+		if i == 0 {
+			mode = 0600
+		}
+		name, err := stageCertificateFile(dir, filepath.Base(files[i].path)+".new-", data, mode)
+		if err != nil {
+			return err
+		}
+		files[i].temporary = name
+		info, err := os.Lstat(files[i].path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("certificate target is not a regular file: %s", files[i].path)
+		}
+		backup, err := os.CreateTemp(dir, filepath.Base(files[i].path)+".backup-")
+		if err != nil {
+			return err
+		}
+		files[i].backup = backup.Name()
+		if err := backup.Close(); err != nil {
+			os.Remove(backup.Name())
+			return err
+		}
+		if err := os.Remove(backup.Name()); err != nil {
+			return err
+		}
+	}
+	rollback := func(cause error) error {
+		for i := len(files) - 1; i >= 0; i-- {
+			file := files[i]
+			if file.installed {
+				if err := os.Remove(file.path); err != nil && !os.IsNotExist(err) {
+					cause = errors.Join(cause, fmt.Errorf("remove newly installed %s: %w", file.path, err))
+				}
+			}
+			if file.backedUp {
+				if err := rename(file.backup, file.path); err != nil {
+					cause = errors.Join(cause, fmt.Errorf("restore %s from backup %s: %w", file.path, file.backup, err))
+				}
+			}
+		}
+		return cause
+	}
+	for _, file := range files {
+		if file.backup != "" {
+			if err := rename(file.path, file.backup); err != nil {
+				return rollback(err)
+			}
+			file.backedUp = true
+		}
+	}
+	for _, file := range files {
+		if err := rename(file.temporary, file.path); err != nil {
+			return rollback(err)
+		}
+		file.installed = true
+	}
+	for _, file := range files {
+		if file.backedUp {
+			os.Remove(file.backup)
+		}
+	}
+	return nil
+}
+
+func stageCertificateFile(dir, prefix string, data []byte, mode os.FileMode) (string, error) {
+	file, err := os.CreateTemp(dir, prefix)
+	if err != nil {
+		return "", err
+	}
+	name := file.Name()
+	complete := false
+	defer func() {
+		file.Close()
+		if !complete {
+			os.Remove(name)
+		}
+	}()
+	if err := file.Chmod(mode); err != nil {
+		return "", err
+	}
+	if _, err := file.Write(data); err != nil {
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	complete = true
+	return name, nil
 }
 
 func GetCertDN(pemString string) (string, error) {
