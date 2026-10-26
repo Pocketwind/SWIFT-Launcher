@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,6 +31,9 @@ func main() {
 		Name:        "SWIFT-Launcher-Service",
 		DisplayName: "SWIFT-Launcher-Service",
 		Description: "SWIFT messaging service",
+	}
+	if runtime.GOOS == "linux" {
+		svcConfig.Option = service.KeyValue{"UserService": true}
 	}
 
 	prg := &program{}
