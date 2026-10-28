@@ -13,6 +13,8 @@ import (
 	"github.com/Pocketwind/SWIFT-Launcher/config"
 	"github.com/Pocketwind/SWIFT-Launcher/fsutil"
 	"github.com/Pocketwind/SWIFT-Launcher/logging"
+	"github.com/Pocketwind/SWIFT-Launcher/validation"
+	"github.com/Pocketwind/SWIFT-Launcher/xmlutil"
 	"github.com/antchfx/xmlquery"
 )
 
@@ -61,6 +63,20 @@ func MTDataMaker(path string, logCh chan<- logging.LogData) (MTData, error) {
 	findata.Payload = payload
 	findata.SenderReference = strings.TrimSpace(trnTail[:trnEnd])
 
+	validator, err := validation.Default()
+	if err != nil {
+		return MTData{}, fmt.Errorf("initializing message validation: %w", err)
+	}
+	if err := validator.ValidateMT(str); err != nil {
+		return MTData{}, fmt.Errorf("MT reference validation failed: %w", err)
+	}
+	if str[block2+3] == 'O' {
+		// Output headers carry the sender LT inside the message input
+		// reference; their basic header identifies the receiver instead.
+		findata.Sender = str[block2+17 : block2+29]
+		findata.Receiver = str[block1+6 : block1+18]
+	}
+
 	return findata, nil
 }
 
@@ -86,15 +102,37 @@ func MXDataMaker(path string, logCh chan<- logging.LogData) (MXData, error) {
 	mxdata.SenderReference = fsutil.SafeInnerText(xmlquery.FindOne(doc, "//*[local-name()='SenderReference']"))
 	mxdata.ServiceCode = fsutil.SafeInnerText(xmlquery.FindOne(doc, "//*[local-name()='NetworkInfo']/*[local-name()='Service']"))
 	mxdata.Format = "MX"
-	body := xmlquery.FindOne(doc, "//*[local-name()='Body']")
-	if body == nil {
-		return MXData{}, fmt.Errorf("MX message missing Body")
+	bodies := xmlquery.Find(doc, "//*[local-name()='Body']")
+	if len(bodies) != 1 {
+		return MXData{}, fmt.Errorf("MX message requires exactly one Body (found %d)", len(bodies))
 	}
+	body := bodies[0]
 	if mxdata.MessageType == "" || mxdata.Requestor == "" || mxdata.Responder == "" || mxdata.SenderReference == "" || mxdata.ServiceCode == "" {
 		return MXData{}, fmt.Errorf("MX message missing required routing or reference fields")
 	}
-	mxdata.Payload = body.OutputXML(false)
-	mxdata.Payload = "<envelope:Envelope xmlns:envelope=\"urn:swift:xsd:envelope\">" + mxdata.Payload + "</envelope:Envelope>"
+	for _, name := range []string{"AppHdr", "Document"} {
+		nodes := xmlquery.Find(doc, "//*[local-name()='"+name+"']")
+		if len(nodes) != 1 || nodes[0].Parent != body {
+			return MXData{}, fmt.Errorf("MX Body requires exactly one direct %s element", name)
+		}
+	}
+	validator, err := validation.Default()
+	if err != nil {
+		return MXData{}, fmt.Errorf("initializing message validation: %w", err)
+	}
+	if err := validator.ValidateMX(str); err != nil {
+		return MXData{}, fmt.Errorf("MX validation failed: %w", err)
+	}
+
+	// Each extracted element needs its ancestor namespace bindings after it is
+	// removed from DataPDU/Body and placed inside a new Envelope.
+	var payload strings.Builder
+	payload.WriteString("<envelope:Envelope xmlns:envelope=\"urn:swift:xsd:envelope\">")
+	for child := body.FirstChild; child != nil; child = child.NextSibling {
+		payload.WriteString(xmlutil.OutputStandaloneXML(child))
+	}
+	payload.WriteString("</envelope:Envelope>")
+	mxdata.Payload = payload.String()
 
 	//fmt.Printf("Parsed MXData: %+v\n", mxdata)
 

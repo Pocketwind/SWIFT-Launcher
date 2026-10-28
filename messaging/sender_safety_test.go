@@ -282,11 +282,15 @@ func TestErrorRouterPreservesSameNamedFailures(t *testing.T) {
 	dir := t.TempDir()
 	partner := &config.Partner{ErrorPath: filepath.Join(dir, "error")}
 	source := filepath.Join(dir, "message.fin")
+	reasons := map[string]string{
+		"first failed original":  "통화 코드 ZZZ 검증 실패",
+		"second failed original": "BIC NONEKRSEXXX 검증 실패",
+	}
 	for _, body := range []string{"first failed original", "second failed original"} {
 		if err := os.WriteFile(source, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := ErrorMessageRouter(source, partner); err != nil {
+		if err := ErrorMessageRouter(source, partner, errors.New(reasons[body])); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -296,11 +300,23 @@ func TestErrorRouterPreservesSameNamedFailures(t *testing.T) {
 	}
 	bodies := make(map[string]bool)
 	for _, path := range paths {
+		folder := filepath.Base(filepath.Dir(path))
+		if !strings.HasPrefix(folder, "failed-") {
+			t.Fatalf("failed message directory lacks prefix: %s", folder)
+		}
+		stamp, _, _ := strings.Cut(strings.TrimPrefix(folder, "failed-"), "-")
+		if _, err := time.Parse("20060102T150405.000000000Z", stamp); err != nil {
+			t.Fatalf("failed message directory lacks UTC timestamp: %s, %v", folder, err)
+		}
 		body, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		bodies[string(body)] = true
+		failureLog, err := os.ReadFile(path + ".log")
+		if err != nil || string(failureLog) != reasons[string(body)]+"\n" {
+			t.Fatalf("failure reason does not match its original: %q, %v", failureLog, err)
+		}
 	}
 	if !bodies["first failed original"] || !bodies["second failed original"] {
 		t.Fatalf("failed originals were not preserved: %v", bodies)
@@ -308,11 +324,21 @@ func TestErrorRouterPreservesSameNamedFailures(t *testing.T) {
 }
 
 func TestCollectorHoldsUncertainSourceAndArchivesAcceptedSource(t *testing.T) {
-	const original = "{1:F01BANKBICXXXXX0000000000}{2:I103BANKBICXXXXXN}{4:\n:20:TESTREF\n:32A:TEST\n-}"
-	for _, accepted := range []bool{false, true} {
-		t.Run(map[bool]string{false: "uncertain", true: "accepted"}[accepted], func(t *testing.T) {
+	setupValidationData(t)
+	const original = validValidationMT
+	for _, tc := range []struct {
+		name                     string
+		accepted, archiveEnabled bool
+	}{
+		{"uncertain with archive", false, true},
+		{"uncertain without archive", false, false},
+		{"accepted with archive", true, true},
+		{"accepted without archive", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			partner := &config.Partner{Name: "unit", ProgressPath: filepath.Join(dir, "progress"), ErrorPath: filepath.Join(dir, "error")}
+			partner := &config.Partner{Name: "unit", ProgressPath: filepath.Join(dir, "progress"), ErrorPath: filepath.Join(dir, "error"),
+				ArchiveEnabled: tc.archiveEnabled, ArchivePath: filepath.Join(dir, "archive")}
 			if err := os.Mkdir(partner.ProgressPath, 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -320,8 +346,10 @@ func TestCollectorHoldsUncertainSourceAndArchivesAcceptedSource(t *testing.T) {
 			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
 				t.Fatal(err)
 			}
+			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if accepted {
+				calls.Add(1)
+				if tc.accepted {
 					w.WriteHeader(201)
 					io.WriteString(w, `{"message_cloud_reference":"ref-123"}`)
 				} else {
@@ -330,7 +358,10 @@ func TestCollectorHoldsUncertainSourceAndArchivesAcceptedSource(t *testing.T) {
 			}))
 			defer server.Close()
 			err := processMTFile(senderTestSettings(server), path, partner, senderTestToken(t), make(chan logging.LogData, 32), false)
-			if !accepted {
+			if calls.Load() != 1 {
+				t.Fatalf("submission count = %d, want 1; err=%v", calls.Load(), err)
+			}
+			if !tc.accepted {
 				var uncertain *UncertainSendError
 				if !errors.As(err, &uncertain) {
 					t.Fatalf("expected uncertain error: %v", err)
@@ -342,12 +373,27 @@ func TestCollectorHoldsUncertainSourceAndArchivesAcceptedSource(t *testing.T) {
 				if _, err := os.Stat(path + ".hold.json"); err != nil {
 					t.Fatalf("held state missing: %v", err)
 				}
+				if _, err := os.Stat(partner.ArchivePath); !os.IsNotExist(err) {
+					t.Fatalf("uncertain submission created an accepted archive: %v", err)
+				}
 				return
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			matches, err := filepath.Glob(filepath.Join(partner.ProgressPath, "sent", "*", "original", "message.fin"))
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("accepted source still in progress: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(partner.ProgressPath, "sent")); !os.IsNotExist(err) {
+				t.Fatalf("legacy progress/sent archive was created: %v", err)
+			}
+			if !tc.archiveEnabled {
+				if _, err := os.Stat(partner.ArchivePath); !os.IsNotExist(err) {
+					t.Fatalf("archive directory created while disabled: %v", err)
+				}
+				return
+			}
+			matches, err := filepath.Glob(filepath.Join(partner.ArchivePath, "*", "message.fin"))
 			if err != nil || len(matches) != 1 {
 				t.Fatalf("accepted original archive missing: %v", err)
 			}
@@ -355,7 +401,7 @@ func TestCollectorHoldsUncertainSourceAndArchivesAcceptedSource(t *testing.T) {
 			if err != nil || string(got) != original {
 				t.Fatalf("archived original differs: %v", err)
 			}
-			receiptPath := filepath.Join(filepath.Dir(filepath.Dir(matches[0])), "receipt.json")
+			receiptPath := filepath.Join(filepath.Dir(matches[0]), "receipt.json")
 			receipt, err := os.ReadFile(receiptPath)
 			var metadata map[string]any
 			if err != nil || json.Unmarshal(receipt, &metadata) != nil || metadata["reference"] != "ref-123" {

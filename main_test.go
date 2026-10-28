@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +13,41 @@ import (
 	"github.com/Pocketwind/SWIFT-Launcher/config"
 	"github.com/Pocketwind/SWIFT-Launcher/logging"
 )
+
+func TestPrepareArchiveDirectoriesHonorsEnabledOption(t *testing.T) {
+	dir := t.TempDir()
+	partners := []config.Partner{
+		{Name: "enabled", Status: true, ArchiveEnabled: true, InputPath: filepath.Join(dir, "input"), ProgressPath: filepath.Join(dir, "progress")},
+		{Name: "disabled", Status: true, ArchiveEnabled: false, ArchivePath: filepath.Join(dir, "disabled")},
+		{Name: "inactive", Status: false, ArchiveEnabled: true, ArchivePath: filepath.Join(dir, "inactive")},
+	}
+	if err := prepareArchiveDirectories(partners); err != nil {
+		t.Fatal(err)
+	}
+	for i, partner := range partners {
+		_, err := os.Stat(partner.ArchiveDirectory())
+		if i == 0 && err != nil || i != 0 && !os.IsNotExist(err) {
+			t.Fatalf("unexpected archive directory state for %s: %v", partner.Name, err)
+		}
+	}
+}
+
+func TestPrepareArchiveDirectoriesRejectsWatchedInput(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input")
+	for _, destination := range []string{input, filepath.Join(input, "nested")} {
+		partners := []config.Partner{
+			{Name: "archive owner", Status: true, ArchiveEnabled: true, ArchivePath: destination},
+			{Name: "other input", Status: true, InputPath: input},
+		}
+		if err := prepareArchiveDirectories(partners); err == nil || !strings.Contains(err.Error(), "other input") {
+			t.Fatalf("archive inside a watched input directory accepted: %v", err)
+		}
+		if _, err := os.Stat(input); !os.IsNotExist(err) {
+			t.Fatalf("invalid archive directory was created: %v", err)
+		}
+	}
+}
 
 func TestConsoleReaderPreservesInteractiveCommandInput(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader("refresh\nreference\nauthcode\nexit\n"))

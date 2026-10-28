@@ -323,6 +323,11 @@ func app(interactive bool, serviceStop <-chan struct{}) {
 		}
 	}
 	//Output Partner 구성
+	if err := prepareArchiveDirectories(inputPartners); err != nil {
+		logging.Easylog(logCh, "ERROR", fmt.Sprintf("Failed to prepare archives: %v", err))
+		shutdownEarly("Startup aborted: invalid archive configuration or unavailable archive directory")
+		return
+	}
 	for i := range outputPartners {
 		err = fsutil.EnsureDir(fsutil.PathHelper(outputPartners[i].OutputPath))
 		if err != nil {
@@ -560,20 +565,27 @@ func startStatusService(wg *sync.WaitGroup, settings *config.Settings, tokenData
 
 		partnerList := make([]config.StatusData, 0, len(partners))
 		for _, p := range partners {
+			archiveEnabled := p.Direction == "in" && p.ArchiveEnabled
+			archivePath := ""
+			if archiveEnabled {
+				archivePath = p.ArchiveDirectory()
+			}
 			partnerList = append(partnerList, config.StatusData{
-				Name:         p.Name,
-				Direction:    p.Direction,
-				Status:       p.Status,
-				Type:         p.Type,
-				InputPath:    p.InputPath,
-				OutputPath:   p.OutputPath,
-				AckPath:      p.AckPath,
-				ErrorPath:    p.ErrorPath,
-				ProgressPath: p.ProgressPath,
-				Extension:    p.Extension,
-				IsDFA:        p.IsDFA,
-				DFAInfo:      p.DFAInfo,
-				Route:        p.Route,
+				Name:           p.Name,
+				Direction:      p.Direction,
+				Status:         p.Status,
+				Type:           p.Type,
+				InputPath:      p.InputPath,
+				OutputPath:     p.OutputPath,
+				AckPath:        p.AckPath,
+				ErrorPath:      p.ErrorPath,
+				ProgressPath:   p.ProgressPath,
+				ArchiveEnabled: archiveEnabled,
+				ArchivePath:    archivePath,
+				Extension:      p.Extension,
+				IsDFA:          p.IsDFA,
+				DFAInfo:        p.DFAInfo,
+				Route:          p.Route,
 			})
 		}
 
@@ -616,6 +628,34 @@ func startStatusService(wg *sync.WaitGroup, settings *config.Settings, tokenData
 			_ = server.Close()
 		}
 	}()
+}
+
+func prepareArchiveDirectories(partners []config.Partner) error {
+	for _, partner := range partners {
+		if !partner.Status || !partner.ArchiveEnabled {
+			continue
+		}
+		archiveDir, err := filepath.Abs(fsutil.PathHelper(partner.ArchiveDirectory()))
+		if err != nil {
+			return fmt.Errorf("archive path for %s: %w", partner.Name, err)
+		}
+		for _, input := range partners {
+			if !input.Status || strings.TrimSpace(input.InputPath) == "" {
+				continue
+			}
+			inputDir, err := filepath.Abs(fsutil.PathHelper(input.InputPath))
+			if err != nil {
+				return fmt.Errorf("input path for %s: %w", input.Name, err)
+			}
+			if fsutil.IsPathUnderDir(archiveDir, inputDir) {
+				return fmt.Errorf("archive path for %s must be outside watched input directory for %s", partner.Name, input.Name)
+			}
+		}
+		if err := fsutil.EnsureDir(archiveDir); err != nil {
+			return fmt.Errorf("archive directory for %s: %w", partner.Name, err)
+		}
+	}
+	return nil
 }
 
 func showHelp() {

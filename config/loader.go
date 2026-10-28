@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 
 	json "github.com/json-iterator/go"
@@ -23,9 +24,21 @@ func LoadPartners(path string) ([]Partner, error) {
 	if err != nil {
 		return nil, err
 	}
-	var partners []Partner
-	if err := json.Unmarshal(data, &partners); err != nil {
+	var entries []json.RawMessage
+	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil, err
+	}
+	if entries == nil {
+		return nil, nil
+	}
+	partners := make([]Partner, len(entries))
+	for i, entry := range entries {
+		// Decode over the default to distinguish an omitted setting from an
+		// explicit false without changing Partner's public bool field.
+		partners[i].ArchiveEnabled = true
+		if err := json.Unmarshal(entry, &partners[i]); err != nil {
+			return nil, fmt.Errorf("partner %d: %w", i+1, err)
+		}
 	}
 	return partners, nil
 }

@@ -97,52 +97,20 @@ func routeSendFailure(filePath string, partner *config.Partner, err error) error
 		}
 		return err
 	}
-	if routeErr := ErrorMessageRouter(filePath, partner); routeErr != nil {
+	if routeErr := ErrorMessageRouter(filePath, partner, err); routeErr != nil {
 		return fmt.Errorf("%w; %v", err, routeErr)
 	}
 	return err
 }
 
-func archiveSentFile(filePath string, partner *config.Partner, reference string, payload ...[]byte) (string, error) {
-	sentDir := filepath.Join(partner.ProgressPath, "sent")
-	if err := os.MkdirAll(sentDir, 0700); err != nil {
-		return "", err
-	}
-	archiveDir, err := os.MkdirTemp(sentDir, time.Now().UTC().Format("20060102T150405Z")+"-*")
-	if err != nil {
-		return "", err
-	}
-	originalDir := filepath.Join(archiveDir, "original")
-	if err := os.Mkdir(originalDir, 0700); err != nil {
-		return "", err
-	}
-	// A normal FileAct companion and its Body are separate files. Preserve
-	// the validated body bytes as well, without deleting a possibly shared
-	// input payload that another companion still references.
-	if len(payload) != 0 {
-		if err := fsutil.AtomicWriteFile(filepath.Join(archiveDir, "payload.bin"), payload[0], 0600); err != nil {
-			return "", err
-		}
-	}
-	receipt, err := json.MarshalIndent(map[string]any{
-		"state": "submitted", "reference": reference, "partner": partner.Name,
-		"file": filepath.Base(filePath), "time": time.Now().UTC().Format(time.RFC3339),
-	}, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	// Record remote acceptance before moving the source. If either write or
-	// move fails, the source stays held in progress rather than being retried.
-	if err := fsutil.AtomicWriteFile(filepath.Join(archiveDir, "receipt.json"), receipt, 0600); err != nil {
-		return "", err
-	}
-	if err := os.Rename(fsutil.PathHelper(filePath), filepath.Join(originalDir, filepath.Base(filePath))); err != nil {
-		return "", err
-	}
-	return archiveDir, nil
-}
-
 func completeOutgoing(filePath string, partner *config.Partner, reference string, logCh chan<- logging.LogData, payload ...[]byte) error {
+	if !partner.ArchiveEnabled {
+		if err := os.Remove(fsutil.PathHelper(filePath)); err != nil {
+			return routeSendFailure(filePath, partner, uncertainSend("accepted submission "+reference, fmt.Errorf("removing original with archiving disabled: %w", err)))
+		}
+		logging.Easylog(logCh, "INFO", "Message submitted successfully. Reference: "+reference+"; archiving disabled, original removed")
+		return nil
+	}
 	archive, err := archiveSentFile(filePath, partner, reference, payload...)
 	if err != nil {
 		return routeSendFailure(filePath, partner, uncertainSend("accepted submission "+reference, fmt.Errorf("archiving original: %w", err)))

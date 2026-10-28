@@ -10,6 +10,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/json-iterator/go v1.1.12
 	github.com/kardianos/service v1.2.4
+	github.com/knroy/go-xml v1.3.1
 	modernc.org/sqlite v1.53.0
 )
 
@@ -25,7 +26,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
-	golang.org/x/text v0.21.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/Pocketwind/SWIFT-Launcher/config"
 	"github.com/Pocketwind/SWIFT-Launcher/fsutil"
@@ -68,20 +69,29 @@ func MTRouter(route config.Route, message MTMessage) bool {
 	return true
 }
 
-func ErrorMessageRouter(filePath string, partner *config.Partner) error {
+func ErrorMessageRouter(filePath string, partner *config.Partner, cause error) error {
+	if cause == nil {
+		return fmt.Errorf("error reason is not provided; original retained in progress")
+	}
 	if partner.ErrorPath == "" {
 		return fmt.Errorf("error directory is not configured; original retained in progress")
 	}
 	if err := os.MkdirAll(partner.ErrorPath, 0700); err != nil {
 		return fmt.Errorf("creating error directory: %w", err)
 	}
-	// Use a unique attempt directory so an earlier failed original survives
-	// when another input arrives with the same filename.
-	dir, err := os.MkdirTemp(partner.ErrorPath, "failed-*")
+	// Use the failure time, with a collision suffix when needed, so earlier
+	// originals survive when another input arrives with the same filename.
+	dir, err := createTimestampDirectory(partner.ErrorPath, "failed-", time.Now())
 	if err != nil {
 		return fmt.Errorf("creating error archive: %w", err)
 	}
-	err = os.Rename(fsutil.PathHelper(filePath), filepath.Join(dir, fsutil.GetFileName(filePath)))
+	destination := filepath.Join(dir, fsutil.GetFileName(filePath))
+	// Save only this message's failure, including multiline validation details.
+	// Keep the original in progress if the error log cannot be saved.
+	if err := fsutil.AtomicWriteFile(destination+".log", []byte(cause.Error()+"\n"), 0600); err != nil {
+		return fmt.Errorf("failed to save message error log; original retained in progress: %w", err)
+	}
+	err = os.Rename(fsutil.PathHelper(filePath), destination)
 	if err != nil {
 		return fmt.Errorf("failed to move file to error directory: %w", err)
 	}
